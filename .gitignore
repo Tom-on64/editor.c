@@ -1,0 +1,7 @@
+editor
+*.o
+*.a
+*.so
+*.bin
+*.log
+
