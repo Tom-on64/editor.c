@@ -28,8 +28,6 @@ static struct editor_config {
  */
 #define CTRL_KEY(_k) ((_k) & 0x1F)
 
-
-
 noreturn
 static void die(const char* s) {
 	fprintf(
@@ -41,6 +39,24 @@ static void die(const char* s) {
 	exit(1);
 }
 
+struct abuf {
+	char* b;
+	int len;
+};
+#define ABUF_NEW { NULL, 0 }
+
+void ab_append(struct abuf* ab, const char* s, int len) {
+	char* new = realloc(ab->b, ab->len + len);
+
+	if (new == NULL) return;
+	memcpy(&new[ab->len], s, len);
+	ab->b = new;
+	ab->len += len;
+}
+
+void ab_free(struct abuf* ab) {
+	free(ab->b);
+}
 
 /*
  * Terminal functions
@@ -108,18 +124,23 @@ static int get_winsize(int* rows, int* cols) {
 /*
  * Rendering
  */
-static void draw_rows(void) {
+static void draw_rows(struct abuf* ab) {
 	for (int y = 0; y < E.screen_rows; y++) {
-		write(STDOUT_FILENO, "~", 1);
-
-		if (y < E.screen_rows - 1) write(STDOUT_FILENO, "\r\n", 2);
+		ab_append(ab, "~", 1);
+		if (y < E.screen_rows - 1) ab_append(ab, "\r\n", 2);
 	}
 }
 
 static void refresh_screen(void) {
-	write(STDOUT_FILENO, "\x1b[2J", 4);
-	write(STDOUT_FILENO, "\x1b[H", 3);
-	draw_rows();
+	struct abuf ab = ABUF_NEW;
+
+	ab_append(&ab, "\x1b[2J", 4);
+	ab_append(&ab, "\x1b[H", 3);
+
+	draw_rows(&ab);
+	
+	write(STDOUT_FILENO, ab.b, ab.len);
+	ab_free(&ab);
 }
 
 /*
