@@ -14,16 +14,33 @@
 #include <errno.h>
 #include <stdio.h>
 
-const char* VERSION = "0.0.1";
+const char* VERSION = "0.0.2";
 
 /*
- * Global variables
+ * Global definitions
  */
 static struct editor_config {
 	int cx, cy;
 	int screen_rows, screen_cols;
 	struct termios orig_termios;
 } E;
+
+enum editor_key {
+	MOVE_UP = 1000,
+	MOVE_DOWN,
+	MOVE_LEFT,
+	MOVE_RIGHT,
+	MOVE_HOME,
+	MOVE_END,
+	PAGE_UP,
+	PAGE_DOWN,
+};
+
+struct abuf {
+	char* b;
+	int len;
+};
+#define ABUF_NEW { NULL, 0 }
 
 /*
  * Generic helpers
@@ -40,12 +57,6 @@ static void die(const char* s) {
 	       );
 	exit(1);
 }
-
-struct abuf {
-	char* b;
-	int len;
-};
-#define ABUF_NEW { NULL, 0 }
 
 void ab_append(struct abuf* ab, const char* s, int len) {
 	char* new = realloc(ab->b, ab->len + len);
@@ -82,7 +93,7 @@ static void enable_raw(void) {
 	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
 }
 
-static char read_key(void) {
+static int read_key(void) {
 	int nread;
 	char c;
 	while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
@@ -94,14 +105,36 @@ static char read_key(void) {
 
 		if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
 		if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
-		if (seq[0] != '[') return '\x1b';
+		if (seq[0] == '[') {
+			if (seq[1] >= '0' && seq[1] <= '9') {
+				if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+				if (seq[2] == '~') {
+					switch (seq[1]) {
+					case '1': return MOVE_HOME;
+					case '4': return MOVE_END;
+					case '5': return PAGE_UP;
+					case '6': return PAGE_DOWN;
+					case '7': return MOVE_HOME;
+					case '8': return MOVE_END;
+					default: return '\x1b';
+					}
+				}
+			}
 
-		switch (seq[1]) {
-		case 'A': return 'k';
-		case 'B': return 'j';
-		case 'C': return 'l';
-		case 'D': return 'h';
-		}
+			switch (seq[1]) {
+			case 'A': return MOVE_UP;
+			case 'B': return MOVE_DOWN;
+			case 'C': return MOVE_RIGHT;
+			case 'D': return MOVE_LEFT;
+			case 'F': return MOVE_END;
+			case 'H': return MOVE_HOME;
+			}
+		} else if (seq[0] == 'O') {
+			switch (seq[1]) {
+			case 'F': return MOVE_END;
+			case 'H': return MOVE_HOME;
+			}
+		} 
 	}
 
 	return c;
@@ -182,24 +215,28 @@ static void refresh_screen(void) {
 /*
  * Input handling
  */
-static void move_cursor(char key) {
+static void move_cursor(int key) {
 	switch (key) {
-	case 'h': E.cx--; break;
-	case 'j': E.cy++; break;
-	case 'k': E.cy--; break;
-	case 'l': E.cx++; break;
+	case MOVE_UP:	 if (E.cy != 0) E.cy--; break;
+	case MOVE_DOWN:  if (E.cy != E.screen_rows) E.cy++; break;
+	case MOVE_LEFT:  if (E.cx != 0) E.cx--; break;
+	case MOVE_RIGHT: if (E.cx != E.screen_cols) E.cx++; break;
 	}
 }
 
 static void process_keypress(void) {
-	char c = read_key();
+	int c = read_key();
 
 	switch (c) {
 	case CTRL_KEY('q'): exit(0); break;
-	case 'h':
-	case 'j':
-	case 'k':
-	case 'l': move_cursor(c); break;
+	case MOVE_HOME: E.cx = 0; break;
+	case MOVE_END: E.cx = E.screen_cols - 1; break;
+	case PAGE_UP:
+	case PAGE_DOWN: for (int i = 0; i < E.screen_rows; i++) move_cursor(c == PAGE_UP ? MOVE_UP : MOVE_DOWN); break;
+	case MOVE_UP:
+	case MOVE_DOWN:
+	case MOVE_LEFT:
+	case MOVE_RIGHT: move_cursor(c); break;
 	}
 }
 
