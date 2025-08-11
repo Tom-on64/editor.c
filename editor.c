@@ -11,14 +11,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
+
+const char* VERSION = "0.0.1";
 
 /*
  * Global variables
  */
 static struct editor_config {
+	int cx, cy;
 	int screen_rows, screen_cols;
 	struct termios orig_termios;
 } E;
@@ -86,6 +88,22 @@ static char read_key(void) {
 	while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
 		if (nread == -1 && errno != EAGAIN) die("read");
 	}
+
+	if (c == '\x1b') {
+		char seq[3];
+
+		if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+		if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+		if (seq[0] != '[') return '\x1b';
+
+		switch (seq[1]) {
+		case 'A': return 'k';
+		case 'B': return 'j';
+		case 'C': return 'l';
+		case 'D': return 'h';
+		}
+	}
+
 	return c;
 }
 
@@ -126,7 +144,20 @@ static int get_winsize(int* rows, int* cols) {
  */
 static void draw_rows(struct abuf* ab) {
 	for (int y = 0; y < E.screen_rows; y++) {
-		ab_append(ab, "~", 1);
+		if (y == E.screen_rows / 3) {
+			char msg[64];
+			int msg_len = snprintf(msg, sizeof(msg), "editor -- version %s", VERSION);
+			if (msg_len > E.screen_cols) msg_len = E.screen_cols;
+			int padding = (E.screen_cols - msg_len) / 2;
+			if (padding > 0) {
+				ab_append(ab, "~", 1);
+				padding--;
+			}
+			while (padding--) ab_append(ab, " ", 1);
+			ab_append(ab, msg, msg_len);
+		} else ab_append(ab, "~", 1);
+
+		ab_append(ab, "\x1b[K", 3);
 		if (y < E.screen_rows - 1) ab_append(ab, "\r\n", 2);
 	}
 }
@@ -134,11 +165,16 @@ static void draw_rows(struct abuf* ab) {
 static void refresh_screen(void) {
 	struct abuf ab = ABUF_NEW;
 
-	ab_append(&ab, "\x1b[2J", 4);
+	ab_append(&ab, "\x1b[?25l", 6);
 	ab_append(&ab, "\x1b[H", 3);
 
 	draw_rows(&ab);
+
+	char buf[32];
+	int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+	ab_append(&ab, buf, len);
 	
+	ab_append(&ab, "\x1b[?25h", 6);
 	write(STDOUT_FILENO, ab.b, ab.len);
 	ab_free(&ab);
 }
@@ -146,11 +182,24 @@ static void refresh_screen(void) {
 /*
  * Input handling
  */
+static void move_cursor(char key) {
+	switch (key) {
+	case 'h': E.cx--; break;
+	case 'j': E.cy++; break;
+	case 'k': E.cy--; break;
+	case 'l': E.cx++; break;
+	}
+}
+
 static void process_keypress(void) {
 	char c = read_key();
 
 	switch (c) {
 	case CTRL_KEY('q'): exit(0); break;
+	case 'h':
+	case 'j':
+	case 'k':
+	case 'l': move_cursor(c); break;
 	}
 }
 
@@ -158,6 +207,8 @@ static void process_keypress(void) {
  * Initialization
  */
 static void init_editor(void) {
+	E.cx = 0;
+	E.cy = 0;
 	if (get_winsize(&E.screen_rows, &E.screen_cols) != 0) die("get_winsize");
 }
 
