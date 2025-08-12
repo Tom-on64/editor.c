@@ -139,7 +139,7 @@ static void row_free(struct erow *row) {
 }
 
 static void row_insert(u32 at, char* s, u32 len) {
-	if (at < 0 || at > E.row_count) at = E.row_count;
+	if (at > E.row_count) at = E.row_count;
 
 	E.rows = realloc(E.rows, sizeof(struct erow) * (E.row_count + 1));
 	if (E.rows == NULL) die("realloc");
@@ -169,7 +169,7 @@ static void row_append_string(struct erow* row, char* s, u32 len) {
 }
 
 static void row_insert_char(struct erow* row, u32 at, u32 c) {
-	if (at < 0 || at > row->len) at = row->len;
+	if (at > row->len) at = row->len;
 	row->chars = realloc(row->chars, row->len + 2);
 	memmove(&row->chars[at + 1], &row->chars[at], row->len - at + 1);
 	row->len++;
@@ -179,7 +179,7 @@ static void row_insert_char(struct erow* row, u32 at, u32 c) {
 }
 
 static void row_delete(u32 at) {
-	if (at < 0 || at >= E.row_count) return;
+	if (at >= E.row_count) return;
 	row_free(&E.rows[at]);
 	memmove(&E.rows[at], &E.rows[at + 1], sizeof(struct erow) * (E.row_count - at - 1));
 	E.row_count--;
@@ -187,7 +187,7 @@ static void row_delete(u32 at) {
 }
 
 static void row_delete_char(struct erow* row, u32 at) {
-	if (at < 0 || at >= row->len) return;
+	if (at >= row->len) return;
 	memmove(&row->chars[at], &row->chars[at + 1], row->len - at);
 	row->len--;
 	row_update(row);
@@ -198,6 +198,11 @@ static char* rows_to_string(u32* buflen) {
 	u32 total = 0;
 	for (u32 j = 0; j < E.row_count; j++) total += E.rows[j].len + 1;
 	*buflen = total;
+
+	if (total == 0) {
+		*buflen = 0;
+		return NULL;
+	}
 
 	char* buf = malloc(total);
 	if (buf == NULL) die("malloc");
@@ -304,7 +309,7 @@ static u8 get_cursor_pos(u32* row, u32* col) {
 
 	buf[i] = '\0';
 	if (buf[0] != '\x1b' || buf[1] != '[') return 1;
-	if (sscanf(&buf[2], "%d;%d", row, col) != 2) return 1;
+	if (sscanf(&buf[2], "%u;%u", row, col) != 2) return 1;
 
 	return 0;
 }
@@ -322,6 +327,10 @@ static u8 get_winsize(u32* rows, u32* cols) {
 	return 0;
 }
 
+/*
+ * File I/O
+ */
+
 static void open_file(char* filepath) {
 	if (!filepath && !E.filename) {
 		statusmsg_set("No file name");
@@ -329,9 +338,7 @@ static void open_file(char* filepath) {
 	} else if (filepath) {
 		free(E.filename);
 		E.filename = strdup(filepath);
-	} else {
-		filepath = E.filename;
-	}
+	} else filepath = E.filename;
 
 	for (u32 i = 0; i < E.row_count; i++) row_free(&E.rows[i]);
 	free(E.rows);
@@ -353,6 +360,9 @@ static void open_file(char* filepath) {
 		}
 		free(row);
 		fclose(fp);
+	} else {
+		if (errno != ENOENT) statusmsg_set("Could not open %s", strerror(errno));
+		else statusmsg_set("New file");
 	}
 
 	E.dirty = false;
@@ -368,14 +378,14 @@ static void save_file(char* filepath) {
 	u32 len;
 	char* buf = rows_to_string(&len);
 
-	int fd = open(filepath, O_RDWR | O_CREAT, 0644);
+	int fd = open(filepath, O_RDWR | O_CREAT | O_TRUNC, 0644);
 	if (
 		fd != -1 &&
 		ftruncate(fd, len) != -1 &&
 		write(fd, buf, len) == len &&
 		fsync(fd) != -1
 	   ) {
-		statusmsg_set("\"%s\" %dL, %dB written.", filepath, E.row_count, len);
+		statusmsg_set("\"%s\" %uL, %uB written.", filepath, E.row_count, len);
 		E.dirty = false;
 	} else statusmsg_set("%s", strerror(errno));
 
@@ -406,12 +416,12 @@ static void draw_banner_row(struct abuf* ab, u32 y) {
 }
 
 static void draw_file_row(struct abuf* ab, u32 file_row) {
-	u32 len = E.rows[file_row].rlen - E.col_offset;
+	u32 rlen = E.rows[file_row].rlen;
+	u32 len = (E.col_offset >= rlen) ? 0 : E.rows[file_row].rlen - E.col_offset;
 
-	char linenr[8];
-	u32 linenr_len = snprintf(linenr, sizeof(linenr), "%4d ", file_row);
+	char linenr[6];
+	u32 linenr_len = snprintf(linenr, sizeof(linenr), "%4u ", file_row + 1);
 
-	if (len < 0) len = 0;
 	if (len + linenr_len > E.screen_cols) len = E.screen_cols;
 	
 	ab_append(ab, linenr, linenr_len);
@@ -435,7 +445,7 @@ static void draw_statusbar(struct abuf* ab) {
 	char lstatus[80], rstatus[80];
 
 	u32 llen = snprintf(lstatus, sizeof(lstatus), "%c %.20s %s", MODE_STR[E.mode][0], E.filename ? E.filename : "No file", E.dirty ? "[modified]" : "");
-	u32 rlen = snprintf(rstatus, sizeof(rstatus), "%d:%d", E.cx + 1, E.cy + 1);
+	u32 rlen = snprintf(rstatus, sizeof(rstatus), "%u:%u", E.cx + 1, E.cy + 1);
 
 	if (llen > E.screen_cols) llen = E.screen_cols;
 	ab_append(ab, lstatus, llen);
@@ -492,7 +502,7 @@ static void refresh_screen(void) {
 	draw_statusmsg(&ab);
 
 	char buf[32];
-	u32 len = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.ry - E.row_offset) + 1, E.rx + 1);
+	u32 len = snprintf(buf, sizeof(buf), "\x1b[%u;%uH", (E.ry - E.row_offset) + 1, E.rx + 6);
 	ab_append(&ab, buf, len);
 	
 	ab_append(&ab, "\x1b[?25h", 6);
@@ -518,7 +528,7 @@ static char* prompt(char* msg) {
 		if (c == ESCAPE) break;
 		else if (c == '\r') return buf;
 		else if ((c == CTRL_KEY('h') || c == BACKSPACE) && len > 0) buf[--len] = '\0';
-		else if (iscntrl(c) || c > 127) continue;
+		else if (iscntrl((u8)c) || c > 127) continue;
 
 		if (len == cap - 1) {
 			cap *= 2;
@@ -561,7 +571,7 @@ static void eval_command(char* cmd) {
 		exit(0);
 	} else if (strcmp(cmd, "e") == 0) {
 		open_file(arg);
-	} else statusmsg_set("'%s' is not implemented");
+	} else statusmsg_set("'%s' is not implemented", cmd);
 }
 
 static void insert_char(u32 c) {
@@ -638,7 +648,7 @@ static void process_keypress(void) {
 	case ':': E.mode = M_COMMAND; break;
 	case CTRL_KEY('c'): statusmsg_set("Type ':qa!' and press <Enter> to abandon all changes and quit"); break;
 
-	default: statusmsg_set("'%c' is not implemented", (isprint(c) && !isblank(c)) ? c : '?'); break;
+	default: statusmsg_set("'%c' is not implemented", (isprint((u8)c) && !isblank((u8)c)) ? c : '?'); break;
 	} else if (E.mode == M_INSERT) switch (c) {
 	case CTRL_KEY('c'):
 	case ESCAPE: E.mode = M_NORMAL; break;
@@ -673,14 +683,15 @@ static void cleanup_editor(void) {
 	free(E.rows);
 	free(E.filename);
 	disable_raw();
+	write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
 }
 
 static void init_editor(void) {
-	enable_raw();
-	atexit(cleanup_editor);
 	memset(&E, 0, sizeof(E));
+	enable_raw();
 	if (get_winsize(&E.screen_rows, &E.screen_cols) != 0) die("get_winsize");
 	E.screen_rows -= 2;
+	atexit(cleanup_editor);
 }
 
 int main(int argc, char** argv) {
