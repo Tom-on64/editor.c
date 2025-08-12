@@ -13,8 +13,10 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <termios.h>
+#include <stdbool.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <ctype.h>
@@ -23,7 +25,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.11"
+#define VERSION	"0.0.12"
 
 /*
  * Global definitions
@@ -31,18 +33,27 @@
 // TODO: Make these configurable
 #define TAB_SIZE	8
 
+typedef uint8_t	 u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int8_t   i8;
+typedef int16_t  i16;
+typedef int32_t  i32;
+typedef int64_t  i64;
+
 enum mode { M_NORMAL, M_INSERT, M_COMMAND, M_VISUAL };
 const char* MODE_STR[] = { "Normal", "Insert", "Command", "Visual" };
 
 static struct editor {
-	int mode;
-	int cx, cy;
-	int rx, ry;
-	int screen_rows, screen_cols;
-	int row_offset, col_offset;
-	int row_count;
+	u8 mode;
+	u32 cx, cy;
+	u32 rx, ry;
+	u32 screen_rows, screen_cols;
+	u32 row_offset, col_offset;
+	u32 row_count;
 	struct erow* rows;
-	int dirty;
+	bool dirty;
 	char* filename;
 	char statusmsg[80];
 	time_t statusmsg_time;
@@ -66,7 +77,7 @@ enum {
 };
 
 // Actions
-enum { MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT };
+typedef enum { MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT } action_t;
 
 /*
  * Generic helpers
@@ -84,9 +95,9 @@ static void die(const char* s) {
 	exit(1);
 }
 
-struct abuf { char* b; int len; };
+struct abuf { char* b; u32 len; };
 
-static void ab_append(struct abuf* ab, const char* s, int len) {
+static void ab_append(struct abuf* ab, const char* s, u32 len) {
 	char* new = realloc(ab->b, ab->len + len);
 	if (new == NULL) die("realloc");
 	memcpy(&new[ab->len], s, len);
@@ -98,11 +109,11 @@ static void ab_free(struct abuf* ab) {
 	free(ab->b);
 }
 
-struct erow { int len, rlen; char *chars, *render; };
+struct erow { u32 len, rlen; char *chars, *render; };
 
 static void row_update(struct erow* row) {
-	int tabs = 0;
-	for (int i = 0; i < row->len; i++) {
+	u32 tabs = 0;
+	for (u32 i = 0; i < row->len; i++) {
 		if (row->chars[i] == '\t') tabs++;
 	}
 
@@ -110,8 +121,8 @@ static void row_update(struct erow* row) {
 	row->render = malloc(row->len + tabs * (TAB_SIZE - 1) + 1);
 	if (row->render == NULL) die("malloc");
 
-	int j = 0;
-	for (int i = 0; i < row->len; i++) {
+	u32 j = 0;
+	for (u32 i = 0; i < row->len; i++) {
 		if (row->chars[i] == '\t') {
 			row->render[j++] = ' ';
 			while (j % TAB_SIZE != 0) row->render[j++] = ' ';
@@ -127,7 +138,7 @@ static void row_free(struct erow *row) {
 	free(row->chars);
 }
 
-static void row_insert(int at, char* s, int len) {
+static void row_insert(u32 at, char* s, u32 len) {
 	if (at < 0 || at > E.row_count) at = E.row_count;
 
 	E.rows = realloc(E.rows, sizeof(struct erow) * (E.row_count + 1));
@@ -144,55 +155,54 @@ static void row_insert(int at, char* s, int len) {
 	row_update(&E.rows[at]);
 
 	E.row_count++;
-	E.dirty = 1;
+	E.dirty = true;
 }
 
-static void row_append_string(struct erow* row, char* s, int len) {
+static void row_append_string(struct erow* row, char* s, u32 len) {
 	row->chars = realloc(row->chars, row->len + len + 1);
 	if (row->chars == NULL) die("realloc");
 	memcpy(&row->chars[row->len], s, len);
 	row->len += len;
 	row->chars[row->len] = '\0';
 	row_update(row);
-	E.dirty = 1;
+	E.dirty = true;
 }
 
-static void row_insert_char(struct erow* row, int at, int c) {
+static void row_insert_char(struct erow* row, u32 at, u32 c) {
 	if (at < 0 || at > row->len) at = row->len;
 	row->chars = realloc(row->chars, row->len + 2);
 	memmove(&row->chars[at + 1], &row->chars[at], row->len - at + 1);
 	row->len++;
 	row->chars[at] = c;
 	row_update(row);
-	E.dirty = 1;
+	E.dirty = true;
 }
 
-static void row_delete(int at) {
+static void row_delete(u32 at) {
 	if (at < 0 || at >= E.row_count) return;
 	row_free(&E.rows[at]);
 	memmove(&E.rows[at], &E.rows[at + 1], sizeof(struct erow) * (E.row_count - at - 1));
 	E.row_count--;
-	E.dirty = 1;
+	E.dirty = true;
 }
 
-static void row_delete_char(struct erow* row, int at) {
+static void row_delete_char(struct erow* row, u32 at) {
 	if (at < 0 || at >= row->len) return;
 	memmove(&row->chars[at], &row->chars[at + 1], row->len - at);
 	row->len--;
 	row_update(row);
-	E.dirty++;
+	E.dirty = true;
 }
 
-static char* rows_to_string(int* buflen) {
-	int total = 0;
-
-	for (int j = 0; j < E.row_count; j++) total += E.rows[j].len + 1;
+static char* rows_to_string(u32* buflen) {
+	u32 total = 0;
+	for (u32 j = 0; j < E.row_count; j++) total += E.rows[j].len + 1;
 	*buflen = total;
 
 	char* buf = malloc(total);
 	if (buf == NULL) die("malloc");
 	char* p = buf;
-	for (int j = 0; j < E.row_count; j++) {
+	for (u32 j = 0; j < E.row_count; j++) {
 		memcpy(p, E.rows[j].chars, E.rows[j].len);
 		p += E.rows[j].len;
 		*p = '\n';
@@ -231,8 +241,8 @@ static void enable_raw(void) {
 	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
 }
 
-static int read_key(void) {
-	int nread;
+static u32 read_key(void) {
+	u32 nread;
 	char c;
 	while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
 		if (nread == -1 && errno != EAGAIN) die("read");
@@ -280,9 +290,9 @@ static int read_key(void) {
 	return c;
 }
 
-static int get_cursor_pos(int* row, int* col) {
+static u8 get_cursor_pos(u32* row, u32* col) {
 	char buf[32];
-	unsigned int i = 0;
+	u32 i = 0;
 
 	if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return 1;
 
@@ -299,7 +309,7 @@ static int get_cursor_pos(int* row, int* col) {
 	return 0;
 }
 
-static int get_winsize(int* rows, int* cols) {
+static u8 get_winsize(u32* rows, u32* cols) {
 	struct winsize ws;
 
 	if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
@@ -323,7 +333,7 @@ static void open_file(char* filepath) {
 		filepath = E.filename;
 	}
 
-	for (int i = 0; i < E.row_count; i++) row_free(&E.rows[i]);
+	for (u32 i = 0; i < E.row_count; i++) row_free(&E.rows[i]);
 	free(E.rows);
 	E.rows = NULL;
 	E.row_count = 0;
@@ -345,7 +355,7 @@ static void open_file(char* filepath) {
 		fclose(fp);
 	}
 
-	E.dirty = 0;
+	E.dirty = false;
 }
 
 static void save_file(char* filepath) {
@@ -355,7 +365,7 @@ static void save_file(char* filepath) {
 	} else if (!E.filename) E.filename = strdup(filepath);
 	else if (!filepath) filepath = E.filename;
 
-	int len;
+	u32 len;
 	char* buf = rows_to_string(&len);
 
 	int fd = open(filepath, O_RDWR | O_CREAT, 0644);
@@ -366,7 +376,7 @@ static void save_file(char* filepath) {
 		fsync(fd) != -1
 	   ) {
 		statusmsg_set("\"%s\" %dL, %dB written.", filepath, E.row_count, len);
-		E.dirty = 0;
+		E.dirty = false;
 	} else statusmsg_set("%s", strerror(errno));
 
 	if (fd != -1) close(fd);
@@ -377,16 +387,16 @@ static void save_file(char* filepath) {
 /*
  * Rendering
  */
-static void draw_banner_row(struct abuf* ab, int y) {
+static void draw_banner_row(struct abuf* ab, u32 y) {
 	if (y != E.screen_rows / 3) {
 		ab_append(ab, "~", 1);
 		return;
 	}
 
 	char msg[80];
-	int msg_len = snprintf(msg, sizeof(msg), "editor -- version %s", VERSION);
+	u32 msg_len = snprintf(msg, sizeof(msg), "editor -- version %s", VERSION);
 	if (msg_len > E.screen_cols) msg_len = E.screen_cols;
-	int padding = (E.screen_cols - msg_len) / 2;
+	u32 padding = (E.screen_cols - msg_len) / 2;
 	if (padding > 0) {
 		ab_append(ab, "~", 1);
 		padding--;
@@ -395,8 +405,8 @@ static void draw_banner_row(struct abuf* ab, int y) {
 	ab_append(ab, msg, msg_len);
 }
 
-static void draw_file_row(struct abuf* ab, int file_row) {
-	int len = E.rows[file_row].rlen - E.col_offset;
+static void draw_file_row(struct abuf* ab, u32 file_row) {
+	u32 len = E.rows[file_row].rlen - E.col_offset;
 
 	if (len < 0) len = 0;
 	if (len > E.screen_cols) len = E.screen_cols;
@@ -408,8 +418,8 @@ static void draw_statusbar(struct abuf* ab) {
 	ab_append(ab, "\x1b[7m", 4);
 	char lstatus[80], rstatus[80];
 
-	int llen = snprintf(lstatus, sizeof(lstatus), "%c %.20s %s", MODE_STR[E.mode][0], E.filename ? E.filename : "No file", E.dirty ? "[modified]" : "");
-	int rlen = snprintf(rstatus, sizeof(rstatus), "%d:%d", E.cx + 1, E.cy + 1);
+	u32 llen = snprintf(lstatus, sizeof(lstatus), "%c %.20s %s", MODE_STR[E.mode][0], E.filename ? E.filename : "No file", E.dirty ? "[modified]" : "");
+	u32 rlen = snprintf(rstatus, sizeof(rstatus), "%d:%d", E.cx + 1, E.cy + 1);
 
 	if (llen > E.screen_cols) llen = E.screen_cols;
 	ab_append(ab, lstatus, llen);
@@ -430,14 +440,14 @@ static void draw_statusbar(struct abuf* ab) {
 
 static void draw_statusmsg(struct abuf* ab) {
 	ab_append(ab, "\x1b[K", 3);
-	int msg_len = strlen(E.statusmsg);
+	u32 msg_len = strlen(E.statusmsg);
 	if (msg_len > E.screen_cols) msg_len = E.screen_cols;
 	if (msg_len && time(NULL) - E.statusmsg_time < 5) ab_append(ab, E.statusmsg, msg_len);
 }
 
 static void draw_rows(struct abuf* ab) {
-	for (int y = 0; y < E.screen_rows; y++) {
-		int file_row = y + E.row_offset;
+	for (u32 y = 0; y < E.screen_rows; y++) {
+		u32 file_row = y + E.row_offset;
 		if (E.row_count == 0) draw_banner_row(ab, y);
 		else if (file_row >= E.row_count) ab_append(ab, "~", 1);
 		else draw_file_row(ab, file_row);
@@ -453,7 +463,7 @@ static void scroll(void) {
 
 	if (E.cy < E.row_count) {
 		E.rx = 0;
-		for (int i = 0; i < E.cx; i++) {
+		for (u32 i = 0; i < E.cx; i++) {
 			if (E.rows[E.cy].chars[i] == '\t') E.rx += (TAB_SIZE - 1) - (E.rx % TAB_SIZE);
 			E.rx++;
 		}
@@ -478,7 +488,7 @@ static void refresh_screen(void) {
 	draw_statusmsg(&ab);
 
 	char buf[32];
-	int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.ry - E.row_offset) + 1, E.rx + 1);
+	u32 len = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.ry - E.row_offset) + 1, E.rx + 1);
 	ab_append(&ab, buf, len);
 	
 	ab_append(&ab, "\x1b[?25h", 6);
@@ -490,17 +500,17 @@ static void refresh_screen(void) {
  * Input handling
  */
 static char* prompt(char* msg) {
-	int cap = 128;
+	u32 cap = 128;
 	char* buf = malloc(cap);
 	if (buf == NULL) die("malloc");
-	int len = 0;
+	u32 len = 0;
 	buf[0] = '\0';
 
 	while (1) {
 		statusmsg_set(msg, buf);
 		refresh_screen();
 
-		int c = read_key();
+		u32 c = read_key();
 		if (c == ESCAPE) break;
 		else if (c == '\r') return buf;
 		else if ((c == CTRL_KEY('h') || c == BACKSPACE) && len > 0) buf[--len] = '\0';
@@ -524,7 +534,7 @@ static void eval_command(char* cmd) {
 	if (!cmd) return;
 
 	while (*cmd && isspace(*cmd)) cmd++;
-	int len = strlen(cmd);
+	u32 len = strlen(cmd);
 	while (len > 0 && isspace(cmd[len - 1])) cmd[--len] = '\0';
 	if (*cmd == '\0') return;
 	
@@ -550,7 +560,7 @@ static void eval_command(char* cmd) {
 	} else statusmsg_set("'%s' is not implemented");
 }
 
-static void insert_char(int c) {
+static void insert_char(u32 c) {
 	if (E.cy == E.row_count) row_insert(E.row_count, "", 0);
 	row_insert_char(&E.rows[E.cy], E.cx, c);
 	E.cx++;
@@ -585,10 +595,10 @@ static void delete_char(void) {
 	}
 }
 
-static void move_cursor(int key) {
+static void move_cursor(action_t a) {
 	struct erow* row = (E.cy >= E.row_count) ? NULL : &E.rows[E.cy];
 
-	switch (key) {
+	switch (a) {
 	case MOVE_UP:	 if (E.cy != 0) E.cy--; break;
 	case MOVE_DOWN:  if (E.cy < E.row_count - 1) E.cy++; break;
 	case MOVE_LEFT:  if (E.cx != 0) E.cx--; break;
@@ -596,12 +606,12 @@ static void move_cursor(int key) {
 	}
 
 	row = (E.cy >= E.row_count) ? NULL : &E.rows[E.cy];
-	int row_len = row ? row->len : 0;
+	u32 row_len = row ? row->len : 0;
 	if (E.cx > row_len) E.cx = row_len;
 }
 
 static void process_keypress(void) {
-	int c = read_key();
+	u32 c = read_key();
 
 	if (E.mode == M_NORMAL) switch (c) {
 	case ARROW_LEFT:
@@ -655,7 +665,7 @@ static void process_keypress(void) {
  * Initialization & cleanup
  */
 static void cleanup_editor(void) {
-	for (int i = 0; i < E.row_count; i++) row_free(&E.rows[i]);
+	for (u32 i = 0; i < E.row_count; i++) row_free(&E.rows[i]);
 	free(E.rows);
 	free(E.filename);
 	disable_raw();
