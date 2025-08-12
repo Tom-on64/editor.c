@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.8"
+#define VERSION	"0.0.9"
 
 /*
  * Global definitions
@@ -139,7 +139,7 @@ static void row_insert(int at, char* s, int len) {
 }
 
 static void row_append_string(struct erow* row, char* s, int len) {
-	row->chars = realloc(row->chars, row->len + len);
+	row->chars = realloc(row->chars, row->len + len + 1);
 	if (row->chars == NULL) die("realloc");
 	memcpy(&row->chars[row->len], s, len);
 	row->len += len;
@@ -181,6 +181,7 @@ static char* rows_to_string(int* buflen) {
 	*buflen = total;
 
 	char* buf = malloc(total);
+	if (buf == NULL) die("malloc");
 	char* p = buf;
 	for (int j = 0; j < E.row_count; j++) {
 		memcpy(p, E.rows[j].chars, E.rows[j].len);
@@ -325,7 +326,7 @@ static void open_file(const char* filepath) {
 
 static void save_file(void) {
 	if (E.filename == NULL) {
-		statusmsg_set("No filename");
+		statusmsg_set("No file name");
 		return;
 	}
 
@@ -336,7 +337,8 @@ static void save_file(void) {
 	if (
 		fd != -1 &&
 		ftruncate(fd, len) != -1 &&
-		write(fd, buf, len) == len
+		write(fd, buf, len) == len &&
+		fsync(fd) != -1
 	   ) {
 		statusmsg_set("\"%s\" %dL, %dB written.", E.filename, E.row_count, len);
 		E.dirty = 0;
@@ -424,7 +426,7 @@ static void scroll(void) {
 	E.rx = E.cx;
 	E.ry = E.cy;
 
-	if (E.rx < E.row_count) {
+	if (E.cy < E.row_count) {
 		E.rx = 0;
 		for (int i = 0; i < E.cx; i++) {
 			if (E.rows[E.cy].chars[i] == '\t') E.rx += (TAB_SIZE - 1) - (E.rx % TAB_SIZE);
@@ -550,7 +552,7 @@ static void process_keypress(void) {
 			if (E.cy > E.row_count) E.cy = E.row_count;
 		}
 
-		for (int i = 0; i < E.screen_rows; i++) move_cursor(c == PAGE_UP ? MOVE_UP : MOVE_DOWN);
+		for (int i = 0; i < E.screen_rows - 1; i++) move_cursor(c == PAGE_UP ? MOVE_UP : MOVE_DOWN);
 	} break;
 	case MOVE_UP:
 	case MOVE_DOWN:
@@ -569,7 +571,6 @@ static void cleanup_editor(void) {
 	for (int i = 0; i < E.row_count; i++) row_free(&E.rows[i]);
 	free(E.rows);
 	free(E.filename);
-	write(STDIN_FILENO, "\x1b[ p", 4);
 	disable_raw();
 }
 
