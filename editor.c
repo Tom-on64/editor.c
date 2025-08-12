@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.7"
+#define VERSION	"0.0.8"
 
 /*
  * Global definitions
@@ -37,6 +37,7 @@ static struct editor {
 	int row_offset, col_offset;
 	int row_count;
 	struct erow* rows;
+	int dirty;
 	char* filename;
 	char statusmsg[80];
 	time_t statusmsg_time;
@@ -44,7 +45,7 @@ static struct editor {
 } E;
 
 enum editor_key {
-	ENTER = '\r',
+	RETURN = '\r',
 	ESCAPE = '\x1b',
 	BACKSPACE = 127,
 	MOVE_UP = 1000,
@@ -98,6 +99,7 @@ static void row_update(struct erow* row) {
 
 	free(row->render);
 	row->render = malloc(row->len + tabs * (TAB_SIZE - 1) + 1);
+	if (row->render == NULL) die("malloc");
 
 	int j = 0;
 	for (int i = 0; i < row->len; i++) {
@@ -111,11 +113,18 @@ static void row_update(struct erow* row) {
 	row->rlen = j;
 }
 
-static void row_append(char* s, size_t len) {
+static void row_free(struct erow *row) {
+	free(row->render);
+	free(row->chars);
+}
+
+static void row_insert(int at, char* s, int len) {
+	if (at < 0 || at > E.row_count) at = E.row_count;
+
 	E.rows = realloc(E.rows, sizeof(struct erow) * (E.row_count + 1));
 	if (E.rows == NULL) die("realloc");
+	memmove(&E.rows[at + 1], &E.rows[at], sizeof(struct erow) * (E.row_count - at));
 	
-	int at = E.row_count;
 	E.rows[at].len = len;
 	E.rows[at].chars = malloc(len + 1);
 	memcpy(E.rows[at].chars, s, len);
@@ -126,15 +135,43 @@ static void row_append(char* s, size_t len) {
 	row_update(&E.rows[at]);
 
 	E.row_count++;
+	E.dirty = 1;
 }
 
-static void row_insert(struct erow* row, int at, int c) {
+static void row_append_string(struct erow* row, char* s, int len) {
+	row->chars = realloc(row->chars, row->len + len);
+	if (row->chars == NULL) die("realloc");
+	memcpy(&row->chars[row->len], s, len);
+	row->len += len;
+	row->chars[row->len] = '\0';
+	row_update(row);
+	E.dirty = 1;
+}
+
+static void row_insert_char(struct erow* row, int at, int c) {
 	if (at < 0 || at > row->len) at = row->len;
 	row->chars = realloc(row->chars, row->len + 2);
 	memmove(&row->chars[at + 1], &row->chars[at], row->len - at + 1);
 	row->len++;
 	row->chars[at] = c;
 	row_update(row);
+	E.dirty = 1;
+}
+
+static void row_delete(int at) {
+	if (at < 0 || at >= E.row_count) return;
+	row_free(&E.rows[at]);
+	memmove(&E.rows[at], &E.rows[at + 1], sizeof(struct erow) * (E.row_count - at - 1));
+	E.row_count--;
+	E.dirty = 1;
+}
+
+static void row_delete_char(struct erow* row, int at) {
+	if (at < 0 || at >= row->len) return;
+	memmove(&row->chars[at], &row->chars[at + 1], row->len - at);
+	row->len--;
+	row_update(row);
+	E.dirty++;
 }
 
 static char* rows_to_string(int* buflen) {
@@ -278,10 +315,12 @@ static void open_file(const char* filepath) {
 
 	while ((row_len = getline(&row, &row_cap, fp)) != -1) {
 		while (row_len > 0 && (row[row_len - 1] == '\n' || row[row_len - 1] == '\r')) row_len--;
-		row_append(row, row_len);
+		row_insert(E.row_count, row, row_len);
 	}
 	free(row);
 	fclose(fp);
+
+	E.dirty = 0;
 }
 
 static void save_file(void) {
@@ -298,11 +337,14 @@ static void save_file(void) {
 		fd != -1 &&
 		ftruncate(fd, len) != -1 &&
 		write(fd, buf, len) == len
-	   ) statusmsg_set("\"%s\" %dL, %dB written.", E.filename, E.row_count, len);
-	else statusmsg_set("%s", strerror(errno));
+	   ) {
+		statusmsg_set("\"%s\" %dL, %dB written.", E.filename, E.row_count, len);
+		E.dirty = 0;
+	} else statusmsg_set("%s", strerror(errno));
 
 	if (fd != -1) close(fd);
 	free(buf);
+	
 }
 
 /*
@@ -339,7 +381,7 @@ static void draw_statusbar(struct abuf* ab) {
 	ab_append(ab, "\x1b[7m", 4);
 	char lstatus[80], rstatus[80];
 
-	int llen = snprintf(lstatus, sizeof(lstatus), "- %.20s - %d lines", E.filename ? E.filename : "No file", E.row_count);
+	int llen = snprintf(lstatus, sizeof(lstatus), " %.20s %s", E.filename ? E.filename : "No file", E.dirty ? "[modified]" : "");
 	int rlen = snprintf(rstatus, sizeof(rstatus), "%d:%d", E.cx + 1, E.cy + 1);
 
 	if (llen > E.screen_cols) llen = E.screen_cols;
@@ -412,7 +454,7 @@ static void refresh_screen(void) {
 	int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.ry - E.row_offset) + 1, E.rx + 1);
 	ab_append(&ab, buf, len);
 	
-	ab_append(&ab, "\x1b[?25h", 6);
+	ab_append(&ab, "\x1b[?25h", 11);
 	write(STDOUT_FILENO, ab.b, ab.len);
 	ab_free(&ab);
 }
@@ -421,9 +463,38 @@ static void refresh_screen(void) {
  * Input handling
  */
 static void insert_char(int c) {
-	if (E.cy == E.row_count) row_append("", 0);
-	row_insert(&E.rows[E.cy], E.cx, c);
+	if (E.cy == E.row_count) row_insert(E.row_count, "", 0);
+	row_insert_char(&E.rows[E.cy], E.cx, c);
 	E.cx++;
+}
+
+static void insert_newline(void) {
+	if (E.cx == 0) row_insert(E.cy, "", 0);
+	else {
+		struct erow* row = &E.rows[E.cy];
+		row_insert(E.cy + 1, &row->chars[E.cx], row->len - E.cx);
+		row = &E.rows[E.cy];
+		row->len = E.cx;
+		row->chars[row->len] = '\0';
+		row_update(row);
+	}
+	E.cy++;
+	E.cx = 0;
+}
+
+static void delete_char(void) {
+	if (E.cy == E.row_count || (E.cx == 0 && E.cy == 0)) return;
+
+	struct erow* row = &E.rows[E.cy];
+	if (E.cx > 0) {
+		row_delete_char(row, E.cx - 1);
+		E.cx--;
+	} else {
+		E.cx = E.rows[E.cy - 1].len;
+		row_append_string(&E.rows[E.cy - 1], row->chars, row->len);
+		row_delete(E.cy);
+		E.cy--;
+	}
 }
 
 static void move_cursor(int key) {
@@ -444,15 +515,26 @@ static void move_cursor(int key) {
 static void process_keypress(void) {
 	int c = read_key();
 
+	static int quit_times = 0;
 	switch (c) {
-	case CTRL_KEY('q'): exit(0); break;
+	case CTRL_KEY('q'): 
+		if (E.dirty && quit_times < 1) {
+			quit_times++;
+			statusmsg_set("No write since last change. Press ^Q again to override");
+			return;
+		}
+		exit(0);
+		break;
 	case CTRL_KEY('c'): statusmsg_set("Press ^Q to quit."); break;
 	case CTRL_KEY('s'): save_file(); break;
+	case DELETE:
+		move_cursor(MOVE_RIGHT);
 	case BACKSPACE:
 	case CTRL_KEY('h'):
-	case DELETE:
+		delete_char();
 		break;
-	case ENTER:
+	case RETURN:
+		insert_newline();
 		break;
 	case CTRL_KEY('l'):
 	case ESCAPE:
@@ -477,26 +559,23 @@ static void process_keypress(void) {
 	default: insert_char(c); break;
 	}
 
+	quit_times = 0;
 }
 
 /*
  * Initialization
  */
 static void cleanup_editor(void) {
-	if (E.filename) free(E.filename);
-	for (int i = 0; i < E.row_count; i++) {
-		if (E.rows[i].chars) free(E.rows[i].chars);
-		if (E.rows[i].render) free(E.rows[i].render);
-	}
-	if (E.rows) free(E.rows);
-
+	for (int i = 0; i < E.row_count; i++) row_free(&E.rows[i]);
+	free(E.rows);
+	free(E.filename);
+	write(STDIN_FILENO, "\x1b[ p", 4);
 	disable_raw();
 }
 
 static void init_editor(void) {
 	enable_raw();
 	atexit(cleanup_editor);
-
 	memset(&E, 0, sizeof(E));
 	if (get_winsize(&E.screen_rows, &E.screen_cols) != 0) die("get_winsize");
 	E.screen_rows -= 2;
