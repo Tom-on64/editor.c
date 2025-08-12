@@ -1,3 +1,12 @@
 editor.c - A simple, vi-like editor
 ===================================
 
+This is a simple, no-dependency, vi-like editor written in one C file.
+
+Features
+--------
+* Normal, Insert & Command mode
+* hjkl movement
+* Arrow key support
+* Random segfaults :)
+

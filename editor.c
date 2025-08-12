@@ -17,12 +17,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.10"
+#define VERSION	"0.0.11"
 
 /*
  * Global definitions
@@ -311,44 +312,60 @@ static int get_winsize(int* rows, int* cols) {
 	return 0;
 }
 
-static void open_file(const char* filepath) {
-	FILE* fp = fopen(filepath, "r");
-	if (!fp) die("fopen");
-
-	free(E.filename);
-	E.filename = strdup(filepath);
-
-	char* row = NULL;
-	size_t row_cap = 0;
-	ssize_t row_len;
-
-	while ((row_len = getline(&row, &row_cap, fp)) != -1) {
-		while (row_len > 0 && (row[row_len - 1] == '\n' || row[row_len - 1] == '\r')) row_len--;
-		row_insert(E.row_count, row, row_len);
+static void open_file(char* filepath) {
+	if (!filepath && !E.filename) {
+		statusmsg_set("No file name");
+		return;
+	} else if (filepath) {
+		free(E.filename);
+		E.filename = strdup(filepath);
+	} else {
+		filepath = E.filename;
 	}
-	free(row);
-	fclose(fp);
+
+	for (int i = 0; i < E.row_count; i++) row_free(&E.rows[i]);
+	free(E.rows);
+	E.rows = NULL;
+	E.row_count = 0;
+
+	E.cx = 0;
+	E.cy = 0;
+
+	FILE* fp = fopen(filepath, "r");
+	if (fp) {
+		char* row = NULL;
+		size_t row_cap = 0;
+		ssize_t row_len;
+
+		while ((row_len = getline(&row, &row_cap, fp)) != -1) {
+			while (row_len > 0 && (row[row_len - 1] == '\n' || row[row_len - 1] == '\r')) row_len--;
+			row_insert(E.row_count, row, row_len);
+		}
+		free(row);
+		fclose(fp);
+	}
 
 	E.dirty = 0;
 }
 
-static void save_file(void) {
-	if (E.filename == NULL) {
+static void save_file(char* filepath) {
+	if (!E.filename && !filepath) {
 		statusmsg_set("No file name");
 		return;
-	}
+	} else if (!E.filename) E.filename = strdup(filepath);
+	else if (!filepath) filepath = E.filename;
 
 	int len;
 	char* buf = rows_to_string(&len);
 
-	int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
+	int fd = open(filepath, O_RDWR | O_CREAT, 0644);
 	if (
 		fd != -1 &&
 		ftruncate(fd, len) != -1 &&
 		write(fd, buf, len) == len &&
 		fsync(fd) != -1
 	   ) {
-		statusmsg_set("\"%s\" %dL, %dB written.", E.filename, E.row_count, len);
+		statusmsg_set("\"%s\" %dL, %dB written.", filepath, E.row_count, len);
 		E.dirty = 0;
 	} else statusmsg_set("%s", strerror(errno));
 
@@ -472,6 +489,67 @@ static void refresh_screen(void) {
 /*
  * Input handling
  */
+static char* prompt(char* msg) {
+	int cap = 128;
+	char* buf = malloc(cap);
+	if (buf == NULL) die("malloc");
+	int len = 0;
+	buf[0] = '\0';
+
+	while (1) {
+		statusmsg_set(msg, buf);
+		refresh_screen();
+
+		int c = read_key();
+		if (c == ESCAPE) break;
+		else if (c == '\r') return buf;
+		else if ((c == CTRL_KEY('h') || c == BACKSPACE) && len > 0) buf[--len] = '\0';
+		else if (iscntrl(c) || c > 127) continue;
+
+		if (len == cap - 1) {
+			cap *= 2;
+			buf = realloc(buf, cap);
+			if (buf == NULL) die("realloc");
+		} 
+
+		buf[len++] = c;
+		buf[len] = '\0';
+	}
+
+	free(buf);
+	return NULL;
+}
+
+static void eval_command(char* cmd) {
+	if (!cmd) return;
+
+	while (*cmd && isspace(*cmd)) cmd++;
+	int len = strlen(cmd);
+	while (len > 0 && isspace(cmd[len - 1])) cmd[--len] = '\0';
+	if (*cmd == '\0') return;
+	
+	char* arg = strchr(cmd, ' ');
+	if (arg) {
+		*arg++ = '\0';
+		while (*arg && isspace(*arg)) arg++;
+		if (*arg == '\0') arg = NULL;
+	}
+
+	if (strcmp(cmd, "q") == 0) {
+		if (E.dirty) statusmsg_set("No write since last change");
+		else exit(0);
+	} else if (strcmp(cmd, "q!") == 0) {
+		exit(0);
+	} else if (strcmp(cmd, "w") == 0) {
+		save_file(arg);
+	} else if (strcmp(cmd, "wq") == 0) {
+		save_file(arg);
+		exit(0);
+	} else if (strcmp(cmd, "e") == 0) {
+		open_file(arg);
+	} else statusmsg_set("'%s' is not implemented");
+}
+
 static void insert_char(int c) {
 	if (E.cy == E.row_count) row_insert(E.row_count, "", 0);
 	row_insert_char(&E.rows[E.cy], E.cx, c);
@@ -526,10 +604,6 @@ static void process_keypress(void) {
 	int c = read_key();
 
 	if (E.mode == M_NORMAL) switch (c) {
-	// NOTE: This is temporary
-	case CTRL_KEY('q'): exit(0); break;
-	case CTRL_KEY('w'): save_file(); break;
-
 	case ARROW_LEFT:
 	case 'h': move_cursor(MOVE_LEFT); break;
 	case ARROW_DOWN:
@@ -547,10 +621,10 @@ static void process_keypress(void) {
 	case 'i':
 	case 'I': E.mode = M_INSERT; break;
 	// TODO: case 'v': E.mode = M_VISUAL; break;
-	// TODO: case ':': E.mode = M_COMMAND; break;
+	case ':': E.mode = M_COMMAND; break;
 	case CTRL_KEY('c'): statusmsg_set("Type ':qa!' and press <Enter> to abandon all changes and quit"); break;
 
-	default: statusmsg_set("'%c' is not implemented", c); break;
+	default: statusmsg_set("'%c' is not implemented", (isprint(c) && !isblank(c)) ? c : '?'); break;
 	} else if (E.mode == M_INSERT) switch (c) {
 	case CTRL_KEY('c'):
 	case ESCAPE: E.mode = M_NORMAL; break;
@@ -568,10 +642,17 @@ static void process_keypress(void) {
 
 	default: insert_char(c); break;
 	}
+
+	if (E.mode == M_COMMAND) {
+		char* cmd = prompt(":%s");
+		eval_command(cmd);
+		free(cmd);
+		E.mode = M_NORMAL;
+	}
 }
 
 /*
- * Initialization
+ * Initialization & cleanup
  */
 static void cleanup_editor(void) {
 	for (int i = 0; i < E.row_count; i++) row_free(&E.rows[i]);
