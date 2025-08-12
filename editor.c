@@ -19,20 +19,13 @@
 #include <errno.h>
 #include <stdio.h>
 
-#define VERSION	"0.0.5"
+#define VERSION	"0.0.6"
 
 /*
  * Global definitions
  */
 // TODO: Make these configurable
 #define TAB_SIZE	8
-
-struct erow {
-	int len;
-	int rlen;
-	char* chars;
-	char* render;
-};
 
 static struct editor {
 	int cx, cy;
@@ -41,6 +34,7 @@ static struct editor {
 	int row_offset, col_offset;
 	int row_count;
 	struct erow* rows;
+	char* filename;
 	struct termios orig_termios;
 } E;
 
@@ -76,8 +70,7 @@ struct abuf { char* b; int len; };
 
 void ab_append(struct abuf* ab, const char* s, int len) {
 	char* new = realloc(ab->b, ab->len + len);
-
-	if (new == NULL) return;
+	if (new == NULL) die("realloc");
 	memcpy(&new[ab->len], s, len);
 	ab->b = new;
 	ab->len += len;
@@ -87,9 +80,8 @@ void ab_free(struct abuf* ab) {
 	free(ab->b);
 }
 
-/*
- * Line operations
- */
+struct erow { int len, rlen; char *chars, *render; };
+
 void row_update(struct erow* row) {
 	int tabs = 0;
 	for (int i = 0; i < row->len; i++) {
@@ -101,7 +93,7 @@ void row_update(struct erow* row) {
 
 	int j = 0;
 	for (int i = 0; i < row->len; i++) {
-		if (row->chars[j] == '\t') {
+		if (row->chars[i] == '\t') {
 			row->render[j++] = ' ';
 			while (j % TAB_SIZE != 0) row->render[j++] = ' ';
 		} else row->render[j++] = row->chars[i];
@@ -113,6 +105,7 @@ void row_update(struct erow* row) {
 
 void row_append(char* s, size_t len) {
 	E.rows = realloc(E.rows, sizeof(struct erow) * (E.row_count + 1));
+	if (E.rows == NULL) die("realloc");
 	
 	int at = E.row_count;
 	E.rows[at].len = len;
@@ -136,7 +129,6 @@ static void disable_raw(void) {
 
 static void enable_raw(void) {
 	if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) die("tcgetattr");
-	atexit(disable_raw);
 
 	struct termios raw = E.orig_termios;
 	raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
@@ -237,6 +229,9 @@ static void open_file(const char* filepath) {
 	FILE* fp = fopen(filepath, "r");
 	if (!fp) die("fopen");
 
+	free(E.filename);
+	E.filename = strdup(filepath);
+
 	char* row = NULL;
 	size_t row_cap = 0;
 	ssize_t row_len;
@@ -258,7 +253,7 @@ static void draw_banner_row(struct abuf* ab, int y) {
 		return;
 	}
 
-	char msg[64];
+	char msg[80];
 	int msg_len = snprintf(msg, sizeof(msg), "editor -- version %s", VERSION);
 	if (msg_len > E.screen_cols) msg_len = E.screen_cols;
 	int padding = (E.screen_cols - msg_len) / 2;
@@ -279,6 +274,29 @@ static void draw_file_row(struct abuf* ab, int file_row) {
 	ab_append(ab, &E.rows[file_row].render[E.col_offset], len);
 }
 
+static void draw_statusbar(struct abuf* ab) {
+	ab_append(ab, "\x1b[7m", 4);
+	char lstatus[80], rstatus[80];
+
+	int llen = snprintf(lstatus, sizeof(lstatus), "- %.20s %d lines", E.filename ? E.filename : "No file", E.row_count);
+	int rlen = snprintf(rstatus, sizeof(rstatus), "%d:%d", E.cx + 1, E.cy + 1);
+
+	if (llen > E.screen_cols) llen = E.screen_cols;
+	ab_append(ab, lstatus, llen);
+
+	while (llen < E.screen_cols) {
+		if (E.screen_cols - llen == rlen) {
+			ab_append(ab, rstatus, rlen);
+			break;
+		}
+
+		ab_append(ab, " ", 1);
+		llen++;
+	}
+
+	ab_append(ab, "\x1b[m", 3);
+}
+
 static void draw_rows(struct abuf* ab) {
 	for (int y = 0; y < E.screen_rows; y++) {
 		int file_row = y + E.row_offset;
@@ -287,30 +305,10 @@ static void draw_rows(struct abuf* ab) {
 		else draw_file_row(ab, file_row);
 
 		ab_append(ab, "\x1b[K", 3);
-		if (y < E.screen_rows - 1) ab_append(ab, "\r\n", 2);
+		ab_append(ab, "\r\n", 2);
 	}
 }
 
-static void refresh_screen(void) {
-	struct abuf ab = { 0 };
-
-	ab_append(&ab, "\x1b[?25l", 6);
-	ab_append(&ab, "\x1b[H", 3);
-
-	draw_rows(&ab);
-
-	char buf[32];
-	int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.ry - E.row_offset) + 1, E.rx + 1);
-	ab_append(&ab, buf, len);
-	
-	ab_append(&ab, "\x1b[?25h", 6);
-	write(STDOUT_FILENO, ab.b, ab.len);
-	ab_free(&ab);
-}
-
-/*
- * Input handling
- */
 static void scroll(void) {
 	E.rx = E.cx;
 	E.ry = E.cy;
@@ -329,12 +327,35 @@ static void scroll(void) {
 	if (E.rx >= E.col_offset + E.screen_cols) E.col_offset = E.rx - E.screen_cols + 1;
 }
 
+static void refresh_screen(void) {
+	scroll();
+
+	struct abuf ab = { 0 };
+
+	ab_append(&ab, "\x1b[?25l", 6);
+	ab_append(&ab, "\x1b[H", 3);
+
+	draw_rows(&ab);
+	draw_statusbar(&ab);
+
+	char buf[32];
+	int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.ry - E.row_offset) + 1, E.rx + 1);
+	ab_append(&ab, buf, len);
+	
+	ab_append(&ab, "\x1b[?25h", 6);
+	write(STDOUT_FILENO, ab.b, ab.len);
+	ab_free(&ab);
+}
+
+/*
+ * Input handling
+ */
 static void move_cursor(int key) {
 	struct erow* row = (E.cy >= E.row_count) ? NULL : &E.rows[E.cy];
 
 	switch (key) {
 	case MOVE_UP:	 if (E.cy != 0) E.cy--; break;
-	case MOVE_DOWN:  if (E.cy < E.row_count) E.cy++; break;
+	case MOVE_DOWN:  if (E.cy < E.row_count - 1) E.cy++; break;
 	case MOVE_LEFT:  if (E.cx != 0) E.cx--; break;
 	case MOVE_RIGHT: if (row && E.cx < row->len) E.cx++; break;
 	}
@@ -342,8 +363,6 @@ static void move_cursor(int key) {
 	row = (E.cy >= E.row_count) ? NULL : &E.rows[E.cy];
 	int row_len = row ? row->len : 0;
 	if (E.cx > row_len) E.cx = row_len;
-
-	scroll();
 }
 
 static void process_keypress(void) {
@@ -352,7 +371,7 @@ static void process_keypress(void) {
 	switch (c) {
 	case CTRL_KEY('q'): exit(0); break;
 	case MOVE_HOME: E.cx = 0; break;
-	case MOVE_END: E.cx = E.rows[E.cy].len; break;
+	case MOVE_END: E.cx = E.rows ? E.rows[E.cy].len : 0; break;
 	case PAGE_UP:
 	case PAGE_DOWN:
 	{
@@ -363,24 +382,39 @@ static void process_keypress(void) {
 		}
 
 		for (int i = 0; i < E.screen_rows; i++) move_cursor(c == PAGE_UP ? MOVE_UP : MOVE_DOWN);
-	}
+	} break;
 	case MOVE_UP:
 	case MOVE_DOWN:
 	case MOVE_LEFT:
 	case MOVE_RIGHT: move_cursor(c); break;
 	}
+
 }
 
 /*
  * Initialization
  */
+static void cleanup_editor(void) {
+	if (E.filename) free(E.filename);
+	for (int i = 0; i < E.row_count; i++) {
+		if (E.rows[i].chars) free(E.rows[i].chars);
+		if (E.rows[i].render) free(E.rows[i].render);
+	}
+	if (E.rows) free(E.rows);
+
+	disable_raw();
+}
+
 static void init_editor(void) {
+	enable_raw();
+	atexit(cleanup_editor);
+
 	memset(&E, 0, sizeof(E));
 	if (get_winsize(&E.screen_rows, &E.screen_cols) != 0) die("get_winsize");
+	E.screen_rows--;
 }
 
 int main(int argc, char** argv) {
-	enable_raw();
 	init_editor();
 
 	if (argc >= 2) open_file(argv[1]);
