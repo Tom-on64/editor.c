@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.9"
+#define VERSION	"0.0.10"
 
 /*
  * Global definitions
@@ -30,7 +30,11 @@
 // TODO: Make these configurable
 #define TAB_SIZE	8
 
+enum mode { M_NORMAL, M_INSERT, M_COMMAND, M_VISUAL };
+const char* MODE_STR[] = { "Normal", "Insert", "Command", "Visual" };
+
 static struct editor {
+	int mode;
 	int cx, cy;
 	int rx, ry;
 	int screen_rows, screen_cols;
@@ -44,20 +48,24 @@ static struct editor {
 	struct termios orig_termios;
 } E;
 
-enum editor_key {
+// Special keys
+enum {
 	RETURN = '\r',
 	ESCAPE = '\x1b',
 	BACKSPACE = 127,
-	MOVE_UP = 1000,
-	MOVE_DOWN,
-	MOVE_LEFT,
-	MOVE_RIGHT,
+	ARROW_UP = 1000,
+	ARROW_DOWN,
+	ARROW_LEFT,
+	ARROW_RIGHT,
 	DELETE,
-	MOVE_HOME,
-	MOVE_END,
+	HOME,
+	END,
 	PAGE_UP,
 	PAGE_DOWN,
 };
+
+// Actions
+enum { MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT };
 
 /*
  * Generic helpers
@@ -240,30 +248,30 @@ static int read_key(void) {
 				if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
 				if (seq[2] == '~') {
 					switch (seq[1]) {
-					case '1': return MOVE_HOME;
+					case '1': return HOME;
 					case '3': return DELETE;
-					case '4': return MOVE_END;
+					case '4': return END;
 					case '5': return PAGE_UP;
 					case '6': return PAGE_DOWN;
-					case '7': return MOVE_HOME;
-					case '8': return MOVE_END;
+					case '7': return HOME;
+					case '8': return END;
 					default: return '\x1b';
 					}
 				}
 			}
 
 			switch (seq[1]) {
-			case 'A': return MOVE_UP;
-			case 'B': return MOVE_DOWN;
-			case 'C': return MOVE_RIGHT;
-			case 'D': return MOVE_LEFT;
-			case 'F': return MOVE_END;
-			case 'H': return MOVE_HOME;
+			case 'A': return ARROW_UP;
+			case 'B': return ARROW_DOWN;
+			case 'C': return ARROW_RIGHT;
+			case 'D': return ARROW_LEFT;
+			case 'F': return END;
+			case 'H': return HOME;
 			}
 		} else if (seq[0] == 'O') {
 			switch (seq[1]) {
-			case 'F': return MOVE_END;
-			case 'H': return MOVE_HOME;
+			case 'F': return END;
+			case 'H': return HOME;
 			}
 		} 
 	}
@@ -383,7 +391,7 @@ static void draw_statusbar(struct abuf* ab) {
 	ab_append(ab, "\x1b[7m", 4);
 	char lstatus[80], rstatus[80];
 
-	int llen = snprintf(lstatus, sizeof(lstatus), " %.20s %s", E.filename ? E.filename : "No file", E.dirty ? "[modified]" : "");
+	int llen = snprintf(lstatus, sizeof(lstatus), "%c %.20s %s", MODE_STR[E.mode][0], E.filename ? E.filename : "No file", E.dirty ? "[modified]" : "");
 	int rlen = snprintf(rstatus, sizeof(rstatus), "%d:%d", E.cx + 1, E.cy + 1);
 
 	if (llen > E.screen_cols) llen = E.screen_cols;
@@ -445,8 +453,8 @@ static void refresh_screen(void) {
 
 	struct abuf ab = { 0 };
 
-	ab_append(&ab, "\x1b[?25l", 6);
 	ab_append(&ab, "\x1b[H", 3);
+	ab_append(&ab, "\x1b[?25l", 6);
 
 	draw_rows(&ab);
 	draw_statusbar(&ab);
@@ -456,7 +464,7 @@ static void refresh_screen(void) {
 	int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.ry - E.row_offset) + 1, E.rx + 1);
 	ab_append(&ab, buf, len);
 	
-	ab_append(&ab, "\x1b[?25h", 11);
+	ab_append(&ab, "\x1b[?25h", 6);
 	write(STDOUT_FILENO, ab.b, ab.len);
 	ab_free(&ab);
 }
@@ -517,51 +525,49 @@ static void move_cursor(int key) {
 static void process_keypress(void) {
 	int c = read_key();
 
-	static int quit_times = 0;
-	switch (c) {
-	case CTRL_KEY('q'): 
-		if (E.dirty && quit_times < 1) {
-			quit_times++;
-			statusmsg_set("No write since last change. Press ^Q again to override");
-			return;
-		}
-		exit(0);
-		break;
-	case CTRL_KEY('c'): statusmsg_set("Press ^Q to quit."); break;
-	case CTRL_KEY('s'): save_file(); break;
-	case DELETE:
-		move_cursor(MOVE_RIGHT);
-	case BACKSPACE:
-	case CTRL_KEY('h'):
-		delete_char();
-		break;
-	case RETURN:
-		insert_newline();
-		break;
-	case CTRL_KEY('l'):
-	case ESCAPE:
-		break;
-	case MOVE_HOME: E.cx = 0; break;
-	case MOVE_END: E.cx = E.rows ? E.rows[E.cy].len : 0; break;
-	case PAGE_UP:
-	case PAGE_DOWN:
-	{
-		E.cy = E.row_offset;
-		if (c == PAGE_DOWN) {
-			E.cy += E.screen_rows - 1; 
-			if (E.cy > E.row_count) E.cy = E.row_count;
-		}
+	if (E.mode == M_NORMAL) switch (c) {
+	// NOTE: This is temporary
+	case CTRL_KEY('q'): exit(0); break;
+	case CTRL_KEY('w'): save_file(); break;
 
-		for (int i = 0; i < E.screen_rows - 1; i++) move_cursor(c == PAGE_UP ? MOVE_UP : MOVE_DOWN);
-	} break;
-	case MOVE_UP:
-	case MOVE_DOWN:
-	case MOVE_LEFT:
-	case MOVE_RIGHT: move_cursor(c); break;
+	case ARROW_LEFT:
+	case 'h': move_cursor(MOVE_LEFT); break;
+	case ARROW_DOWN:
+	case 'j': move_cursor(MOVE_DOWN); break;
+	case ARROW_UP:
+	case 'k': move_cursor(MOVE_UP); break;
+	case ARROW_RIGHT:
+	case 'l': move_cursor(MOVE_RIGHT); break;
+	case HOME:
+	case '_':
+	case '0': E.cx = 0; break;
+	case END:
+	case '$': E.cx = E.rows ? E.rows[E.cy].len : 0; break;
+
+	case 'i':
+	case 'I': E.mode = M_INSERT; break;
+	// TODO: case 'v': E.mode = M_VISUAL; break;
+	// TODO: case ':': E.mode = M_COMMAND; break;
+	case CTRL_KEY('c'): statusmsg_set("Type ':qa!' and press <Enter> to abandon all changes and quit"); break;
+
+	default: statusmsg_set("'%c' is not implemented", c); break;
+	} else if (E.mode == M_INSERT) switch (c) {
+	case CTRL_KEY('c'):
+	case ESCAPE: E.mode = M_NORMAL; break;
+	
+	case RETURN: insert_newline(); break;
+	case DELETE: move_cursor(MOVE_RIGHT);
+	case BACKSPACE:
+	case CTRL_KEY('h'): delete_char(); break;
+	case ARROW_UP: move_cursor(MOVE_UP); break;
+	case ARROW_DOWN: move_cursor(MOVE_DOWN); break;
+	case ARROW_LEFT: move_cursor(MOVE_LEFT); break;
+	case ARROW_RIGHT: move_cursor(MOVE_RIGHT); break;
+	case HOME: E.cx = 0; break;
+	case END: E.cx = E.rows ? E.rows[E.cy].len : 0; break;
+
 	default: insert_char(c); break;
 	}
-
-	quit_times = 0;
 }
 
 /*
