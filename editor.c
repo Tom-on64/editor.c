@@ -13,11 +13,13 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <termios.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
+#include <time.h>
 
 #define VERSION	"0.0.6"
 
@@ -35,6 +37,8 @@ static struct editor {
 	int row_count;
 	struct erow* rows;
 	char* filename;
+	char statusmsg[80];
+	time_t statusmsg_time;
 	struct termios orig_termios;
 } E;
 
@@ -118,6 +122,14 @@ void row_append(char* s, size_t len) {
 	row_update(&E.rows[at]);
 
 	E.row_count++;
+}
+
+static void statusmsg_set(const char* fmt, ...) {
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(E.statusmsg, sizeof(E.statusmsg), fmt, ap);
+	va_end(ap);
+	E.statusmsg_time = time(NULL);
 }
 
 /*
@@ -278,7 +290,7 @@ static void draw_statusbar(struct abuf* ab) {
 	ab_append(ab, "\x1b[7m", 4);
 	char lstatus[80], rstatus[80];
 
-	int llen = snprintf(lstatus, sizeof(lstatus), "- %.20s %d lines", E.filename ? E.filename : "No file", E.row_count);
+	int llen = snprintf(lstatus, sizeof(lstatus), "- %.20s - %d lines", E.filename ? E.filename : "No file", E.row_count);
 	int rlen = snprintf(rstatus, sizeof(rstatus), "%d:%d", E.cx + 1, E.cy + 1);
 
 	if (llen > E.screen_cols) llen = E.screen_cols;
@@ -295,6 +307,14 @@ static void draw_statusbar(struct abuf* ab) {
 	}
 
 	ab_append(ab, "\x1b[m", 3);
+	ab_append(ab, "\r\n", 2);
+}
+
+static void draw_statusmsg(struct abuf* ab) {
+	ab_append(ab, "\x1b[K", 3);
+	int msg_len = strlen(E.statusmsg);
+	if (msg_len > E.screen_cols) msg_len = E.screen_cols;
+	if (msg_len && time(NULL) - E.statusmsg_time < 5) ab_append(ab, E.statusmsg, msg_len);
 }
 
 static void draw_rows(struct abuf* ab) {
@@ -337,6 +357,7 @@ static void refresh_screen(void) {
 
 	draw_rows(&ab);
 	draw_statusbar(&ab);
+	draw_statusmsg(&ab);
 
 	char buf[32];
 	int len = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.ry - E.row_offset) + 1, E.rx + 1);
@@ -411,13 +432,15 @@ static void init_editor(void) {
 
 	memset(&E, 0, sizeof(E));
 	if (get_winsize(&E.screen_rows, &E.screen_cols) != 0) die("get_winsize");
-	E.screen_rows--;
+	E.screen_rows -= 2;
 }
 
 int main(int argc, char** argv) {
 	init_editor();
 
 	if (argc >= 2) open_file(argv[1]);
+
+	statusmsg_set("Hello, World!");
 
 	while (1) {
 		refresh_screen();
