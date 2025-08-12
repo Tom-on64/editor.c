@@ -25,7 +25,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.12"
+#define VERSION	"0.0.13"
 
 /*
  * Global definitions
@@ -42,7 +42,7 @@ typedef int16_t  i16;
 typedef int32_t  i32;
 typedef int64_t  i64;
 
-enum mode { M_NORMAL, M_INSERT, M_COMMAND, M_VISUAL };
+enum mode 		 { M_NORMAL, M_INSERT, M_COMMAND, M_VISUAL };
 const char* MODE_STR[] = { "Normal", "Insert", "Command", "Visual" };
 
 static struct editor {
@@ -408,10 +408,26 @@ static void draw_banner_row(struct abuf* ab, u32 y) {
 static void draw_file_row(struct abuf* ab, u32 file_row) {
 	u32 len = E.rows[file_row].rlen - E.col_offset;
 
+	char linenr[8];
+	u32 linenr_len = snprintf(linenr, sizeof(linenr), "%4d ", file_row);
+
 	if (len < 0) len = 0;
-	if (len > E.screen_cols) len = E.screen_cols;
+	if (len + linenr_len > E.screen_cols) len = E.screen_cols;
 	
+	ab_append(ab, linenr, linenr_len);
 	ab_append(ab, &E.rows[file_row].render[E.col_offset], len);
+}
+
+static void draw_rows(struct abuf* ab) {
+	for (u32 y = 0; y < E.screen_rows; y++) {
+		u32 file_row = y + E.row_offset;
+		if (E.row_count == 0) draw_banner_row(ab, y);
+		else if (file_row >= E.row_count) ab_append(ab, "~", 1);
+		else draw_file_row(ab, file_row);
+
+		ab_append(ab, "\x1b[K", 3);
+		ab_append(ab, "\r\n", 2);
+	}
 }
 
 static void draw_statusbar(struct abuf* ab) {
@@ -443,18 +459,6 @@ static void draw_statusmsg(struct abuf* ab) {
 	u32 msg_len = strlen(E.statusmsg);
 	if (msg_len > E.screen_cols) msg_len = E.screen_cols;
 	if (msg_len && time(NULL) - E.statusmsg_time < 5) ab_append(ab, E.statusmsg, msg_len);
-}
-
-static void draw_rows(struct abuf* ab) {
-	for (u32 y = 0; y < E.screen_rows; y++) {
-		u32 file_row = y + E.row_offset;
-		if (E.row_count == 0) draw_banner_row(ab, y);
-		else if (file_row >= E.row_count) ab_append(ab, "~", 1);
-		else draw_file_row(ab, file_row);
-
-		ab_append(ab, "\x1b[K", 3);
-		ab_append(ab, "\r\n", 2);
-	}
 }
 
 static void scroll(void) {
