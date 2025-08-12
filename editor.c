@@ -18,10 +18,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.6"
+#define VERSION	"0.0.7"
 
 /*
  * Global definitions
@@ -43,6 +44,9 @@ static struct editor {
 } E;
 
 enum editor_key {
+	ENTER = '\r',
+	ESCAPE = '\x1b',
+	BACKSPACE = 127,
 	MOVE_UP = 1000,
 	MOVE_DOWN,
 	MOVE_LEFT,
@@ -72,7 +76,7 @@ static void die(const char* s) {
 
 struct abuf { char* b; int len; };
 
-void ab_append(struct abuf* ab, const char* s, int len) {
+static void ab_append(struct abuf* ab, const char* s, int len) {
 	char* new = realloc(ab->b, ab->len + len);
 	if (new == NULL) die("realloc");
 	memcpy(&new[ab->len], s, len);
@@ -80,13 +84,13 @@ void ab_append(struct abuf* ab, const char* s, int len) {
 	ab->len += len;
 }
 
-void ab_free(struct abuf* ab) {
+static void ab_free(struct abuf* ab) {
 	free(ab->b);
 }
 
 struct erow { int len, rlen; char *chars, *render; };
 
-void row_update(struct erow* row) {
+static void row_update(struct erow* row) {
 	int tabs = 0;
 	for (int i = 0; i < row->len; i++) {
 		if (row->chars[i] == '\t') tabs++;
@@ -107,7 +111,7 @@ void row_update(struct erow* row) {
 	row->rlen = j;
 }
 
-void row_append(char* s, size_t len) {
+static void row_append(char* s, size_t len) {
 	E.rows = realloc(E.rows, sizeof(struct erow) * (E.row_count + 1));
 	if (E.rows == NULL) die("realloc");
 	
@@ -122,6 +126,33 @@ void row_append(char* s, size_t len) {
 	row_update(&E.rows[at]);
 
 	E.row_count++;
+}
+
+static void row_insert(struct erow* row, int at, int c) {
+	if (at < 0 || at > row->len) at = row->len;
+	row->chars = realloc(row->chars, row->len + 2);
+	memmove(&row->chars[at + 1], &row->chars[at], row->len - at + 1);
+	row->len++;
+	row->chars[at] = c;
+	row_update(row);
+}
+
+static char* rows_to_string(int* buflen) {
+	int total = 0;
+
+	for (int j = 0; j < E.row_count; j++) total += E.rows[j].len + 1;
+	*buflen = total;
+
+	char* buf = malloc(total);
+	char* p = buf;
+	for (int j = 0; j < E.row_count; j++) {
+		memcpy(p, E.rows[j].chars, E.rows[j].len);
+		p += E.rows[j].len;
+		*p = '\n';
+		p++;
+	}
+
+	return buf;
 }
 
 static void statusmsg_set(const char* fmt, ...) {
@@ -234,9 +265,6 @@ static int get_winsize(int* rows, int* cols) {
 	return 0;
 }
 
-/*
- * File I/O
- */
 static void open_file(const char* filepath) {
 	FILE* fp = fopen(filepath, "r");
 	if (!fp) die("fopen");
@@ -254,6 +282,27 @@ static void open_file(const char* filepath) {
 	}
 	free(row);
 	fclose(fp);
+}
+
+static void save_file(void) {
+	if (E.filename == NULL) {
+		statusmsg_set("No filename");
+		return;
+	}
+
+	int len;
+	char* buf = rows_to_string(&len);
+
+	int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
+	if (
+		fd != -1 &&
+		ftruncate(fd, len) != -1 &&
+		write(fd, buf, len) == len
+	   ) statusmsg_set("\"%s\" %dL, %dB written.", E.filename, E.row_count, len);
+	else statusmsg_set("%s", strerror(errno));
+
+	if (fd != -1) close(fd);
+	free(buf);
 }
 
 /*
@@ -371,6 +420,12 @@ static void refresh_screen(void) {
 /*
  * Input handling
  */
+static void insert_char(int c) {
+	if (E.cy == E.row_count) row_append("", 0);
+	row_insert(&E.rows[E.cy], E.cx, c);
+	E.cx++;
+}
+
 static void move_cursor(int key) {
 	struct erow* row = (E.cy >= E.row_count) ? NULL : &E.rows[E.cy];
 
@@ -391,6 +446,17 @@ static void process_keypress(void) {
 
 	switch (c) {
 	case CTRL_KEY('q'): exit(0); break;
+	case CTRL_KEY('c'): statusmsg_set("Press ^Q to quit."); break;
+	case CTRL_KEY('s'): save_file(); break;
+	case BACKSPACE:
+	case CTRL_KEY('h'):
+	case DELETE:
+		break;
+	case ENTER:
+		break;
+	case CTRL_KEY('l'):
+	case ESCAPE:
+		break;
 	case MOVE_HOME: E.cx = 0; break;
 	case MOVE_END: E.cx = E.rows ? E.rows[E.cy].len : 0; break;
 	case PAGE_UP:
@@ -408,6 +474,7 @@ static void process_keypress(void) {
 	case MOVE_DOWN:
 	case MOVE_LEFT:
 	case MOVE_RIGHT: move_cursor(c); break;
+	default: insert_char(c); break;
 	}
 
 }
@@ -439,8 +506,6 @@ int main(int argc, char** argv) {
 	init_editor();
 
 	if (argc >= 2) open_file(argv[1]);
-
-	statusmsg_set("Hello, World!");
 
 	while (1) {
 		refresh_screen();
