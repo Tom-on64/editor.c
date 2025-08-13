@@ -25,12 +25,12 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.13"
+#define VERSION	"0.0.14"
 
 /*
  * Global definitions
  */
-// TODO: Make these configurable
+#define MAX_COUNT	0x7FFFFF
 #define TAB_SIZE	8
 
 typedef uint8_t	 u8;
@@ -45,8 +45,15 @@ typedef int64_t  i64;
 enum mode 		 { M_NORMAL, M_INSERT, M_COMMAND, M_VISUAL };
 const char* MODE_STR[] = { "Normal", "Insert", "Command", "Visual" };
 
+enum optype { OP_NONE, OP_DELETE, OP_YANK, OP_CHANGE };
+
+typedef struct { u32 x, y; } pos_t;
+typedef pos_t (*motion_fn)(pos_t start, u32 count);
+
 static struct editor {
 	u8 mode;
+	u8 pending_op;
+	u32 pending_count;
 	u32 cx, cy;
 	u32 rx, ry;
 	u32 screen_rows, screen_cols;
@@ -75,9 +82,6 @@ enum {
 	PAGE_UP,
 	PAGE_DOWN,
 };
-
-// Actions
-typedef enum { MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT } action_t;
 
 /*
  * Generic helpers
@@ -511,6 +515,82 @@ static void refresh_screen(void) {
 }
 
 /*
+ * Motions
+ */
+
+static pos_t motion_up(pos_t p, u32 count) {
+	for (u32 i = 0; i < count; i++) {
+		if (p.y != 0) p.y--;
+	}
+	return p;
+}
+
+static pos_t motion_down(pos_t p, u32 count) {
+	for (u32 i = 0; i < count; i++) {
+		if (p.y < E.row_count) p.y++;
+	}
+	return p;
+}
+
+static pos_t motion_left(pos_t p, u32 count) {
+	for (u32 i = 0; i < count; i++) {
+		if (p.x != 0) p.x--;
+	}
+	return p;
+}
+
+static pos_t motion_right(pos_t p, u32 count) {
+	struct erow* row = (p.y >= E.row_count) ? NULL : &E.rows[p.y];
+	for (u32 i = 0; i < count; i++) {
+		if (row && p.x < row->len) p.x++;
+	}
+	return p;
+}
+
+static pos_t motion_home(pos_t p, u32 count) {
+	p.x = 0;
+	return motion_down(p, count - 1);
+}
+
+static pos_t motion_end(pos_t p, u32 count) {
+	struct erow* row = (p.y >= E.row_count) ? NULL : &E.rows[p.y];
+	p.x = row ? row->len : 0;
+	return motion_down(p, count - 1);
+}
+
+static pos_t motion_fword(pos_t p, u32 count) { return p; }
+static pos_t motion_bword(pos_t p, u32 count) { return p; }
+static pos_t motion_fWORD(pos_t p, u32 count) { return p; }
+static pos_t motion_bWORD(pos_t p, u32 count) { return p; }
+
+static pos_t run_motion(int key, pos_t start, u32 count) {
+	statusmsg_set("  %u%c", count, (u8)key, start.x + 1, start.y + 1);
+
+	switch (key) {
+	case 'h': return motion_left(start, count);
+	case 'j': return motion_down(start, count);
+	case 'k': return motion_up(start, count);
+	case 'l': return motion_right(start, count);
+	case '$': return motion_end(start, count);
+	case '_': return motion_home(start, count);
+	case 'w': return motion_fword(start, count);
+	case 'b': return motion_bword(start, count);
+	case 'W': return motion_fWORD(start, count);
+	case 'B': return motion_bWORD(start, count);
+	default: statusmsg_set("'%c' is not implemented", isprint((u8)key) ? (u8)key : '?'); break;
+	}
+
+	return start;
+}
+
+static void change_range(pos_t start, pos_t end) {}
+
+static void delete_range(pos_t start, pos_t end) {}
+
+static void yank_range(pos_t start, pos_t end) {}
+
+
+/*
  * Input handling
  */
 static char* prompt(char* msg) {
@@ -609,62 +689,57 @@ static void delete_char(void) {
 	}
 }
 
-static void move_cursor(action_t a) {
-	struct erow* row = (E.cy >= E.row_count) ? NULL : &E.rows[E.cy];
-
-	switch (a) {
-	case MOVE_UP:	 if (E.cy != 0) E.cy--; break;
-	case MOVE_DOWN:  if (E.cy < E.row_count - 1) E.cy++; break;
-	case MOVE_LEFT:  if (E.cx != 0) E.cx--; break;
-	case MOVE_RIGHT: if (row && E.cx < row->len) E.cx++; break;
+static void process_normal(u32 c) {
+	if (isdigit((u8)c)) {
+		u32 digit = c - '0';
+		if (E.pending_count == 0 && digit == 0) goto handle_as_motion;
+		E.pending_count = E.pending_count * 10 + digit;
+		return;
 	}
 
-	row = (E.cy >= E.row_count) ? NULL : &E.rows[E.cy];
-	u32 row_len = row ? row->len : 0;
-	if (E.cx > row_len) E.cx = row_len;
+	if (c == 'c') { E.pending_op = OP_CHANGE; return; }
+	if (c == 'd') { E.pending_op = OP_DELETE; return; }
+	if (c == 'y') { E.pending_op = OP_YANK; return; }
+
+handle_as_motion:
+	u32 count = E.pending_count ? E.pending_count : 1;
+	E.pending_count = 0;
+
+	pos_t start = { E.cx, E.cy };
+	pos_t end = run_motion(c, start, count);
+
+	if (E.pending_op != OP_NONE) {
+		switch (E.pending_op) {
+		case OP_CHANGE:	change_range(start, end); break;
+		case OP_DELETE:	delete_range(start, end); break;
+		case OP_YANK:	yank_range(start, end); break;
+		}
+
+		E.pending_op = OP_NONE;
+	} else {
+		E.cx = end.x;
+		E.cy = end.y;
+	}
 }
 
+// TODO: Refactor this mess
 static void process_keypress(void) {
 	u32 c = read_key();
 
 	if (E.mode == M_NORMAL) switch (c) {
-	case ARROW_LEFT:
-	case 'h': move_cursor(MOVE_LEFT); break;
-	case ARROW_DOWN:
-	case 'j': move_cursor(MOVE_DOWN); break;
-	case ARROW_UP:
-	case 'k': move_cursor(MOVE_UP); break;
-	case ARROW_RIGHT:
-	case 'l': move_cursor(MOVE_RIGHT); break;
-	case HOME:
-	case '_':
-	case '0': E.cx = 0; break;
-	case END:
-	case '$': E.cx = E.rows ? E.rows[E.cy].len : 0; break;
-
-	case 'i':
-	case 'I': E.mode = M_INSERT; break;
-	// TODO: case 'v': E.mode = M_VISUAL; break;
+	case 'i': E.mode = M_INSERT; break;
+	case 'I': process_normal('_'); E.mode = M_INSERT; break;
+	case 'a': process_normal('l'); E.mode = M_INSERT; break;
+	case 'A': process_normal('$'); E.mode = M_INSERT; break;
 	case ':': E.mode = M_COMMAND; break;
-	case CTRL_KEY('c'): statusmsg_set("Type ':qa!' and press <Enter> to abandon all changes and quit"); break;
-
-	default: statusmsg_set("'%c' is not implemented", (isprint((u8)c) && !isblank((u8)c)) ? c : '?'); break;
+	default: process_normal(c);
 	} else if (E.mode == M_INSERT) switch (c) {
 	case CTRL_KEY('c'):
-	case ESCAPE: E.mode = M_NORMAL; break;
-	
+	case ESCAPE: E.mode = M_NORMAL; process_normal('h'); break;
 	case RETURN: insert_newline(); break;
-	case DELETE: move_cursor(MOVE_RIGHT);
 	case BACKSPACE:
 	case CTRL_KEY('h'): delete_char(); break;
-	case ARROW_UP: move_cursor(MOVE_UP); break;
-	case ARROW_DOWN: move_cursor(MOVE_DOWN); break;
-	case ARROW_LEFT: move_cursor(MOVE_LEFT); break;
-	case ARROW_RIGHT: move_cursor(MOVE_RIGHT); break;
-	case HOME: E.cx = 0; break;
-	case END: E.cx = E.rows ? E.rows[E.cy].len : 0; break;
-
-	default: insert_char(c); break;
+	default: if (isprint((u8)c)) insert_char(c); break;
 	}
 
 	if (E.mode == M_COMMAND) {
