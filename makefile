@@ -1,5 +1,5 @@
 CC = cc
-CCFLAGS = -Wall -Wextra
+CCFLAGS = -Wall -Wextra -Wno-implicit-fallthrough
 SOURCE = ./editor.c
 TARGET = ./editor
 

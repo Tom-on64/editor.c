@@ -25,7 +25,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.15"
+#define VERSION	"0.0.16"
 
 /*
  * Global definitions
@@ -222,6 +222,12 @@ static char* rows_to_string(u32* buflen) {
 	return buf;
 }
 
+static char get_char_at(pos_t p) {
+	if (p.y >= E.row_count) return '\0';
+	if (p.x >= E.rows[p.y].len) return '\n';
+	return E.rows[p.y].chars[p.x];
+}
+
 static void refresh_screen(void);
 static void statusmsg_set(const char* fmt, ...) {
 	va_list ap;
@@ -254,7 +260,7 @@ static void enable_raw(void) {
 }
 
 static u32 read_key(void) {
-	u32 nread;
+	ssize_t nread;
 	char c;
 	while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
 		if (nread == -1 && errno != EAGAIN) die("read");
@@ -429,7 +435,7 @@ static void draw_file_row(struct abuf* ab, u32 file_row) {
 	char linenr[6];
 	u32 linenr_len = snprintf(linenr, sizeof(linenr), "%4u ", file_row + 1);
 
-	if (len + linenr_len > E.screen_cols) len = E.screen_cols;
+	if (len + linenr_len > E.screen_cols) len = E.screen_cols - linenr_len;
 	
 	ab_append(ab, linenr, linenr_len);
 	ab_append(ab, &E.rows[file_row].render[E.col_offset], len);
@@ -521,7 +527,8 @@ static void refresh_screen(void) {
  * Motions
  */
 static pos_t fix_toofar(pos_t p) {
-	if (p.y >= E.row_count) p.y = E.row_count ? E.row_count - 1 : 0;
+	if (E.row_count == 0) { p.x = 0; p.y = 0; return p; }
+	if (p.y >= E.row_count) p.y = E.row_count - 1;
 	u32 len = E.rows[p.y].len;
 	if (p.x > len) p.x = len;
 	return p;
@@ -563,11 +570,6 @@ static pos_t motion_end(pos_t p, u32 count) {
 	return motion_down(p, count - 1);
 }
 
-static pos_t motion_fword(pos_t p, u32 count) { return p; }
-static pos_t motion_bword(pos_t p, u32 count) { return p; }
-static pos_t motion_fWORD(pos_t p, u32 count) { return p; }
-static pos_t motion_bWORD(pos_t p, u32 count) { return p; }
-
 static pos_t motion_file_top(pos_t p, u32 count) {
 	(void)count;
 	p.y = 0;
@@ -586,25 +588,115 @@ static pos_t motion_file_bottom(pos_t p, u32 count) {
 	return fix_toofar(p);
 }
 
+static inline bool iswordchar(u8 c) { return isalnum(c) || c == '_'; }
+
+static pos_t fword_impl(pos_t p, bool big) {
+	char c = get_char_at(p);
+
+	if (!big && !iswordchar(c)) {
+		p.x++;
+		c = get_char_at(p);
+	}
+
+	if (big ? !isspace((u8)c) : iswordchar((u8)c)) {
+		do {
+			p.x++;
+			c = get_char_at(p);
+			if (c == '\n') { p.x = 0; p.y++; c = get_char_at(p); }
+		} while (c != '\0' && (big ? !isspace((u8)c) : iswordchar((u8)c)));
+	}
+
+	while (isspace((u8)c)) {
+		p.x++;
+		c = get_char_at(p);
+		if (c == '\n') { p.x = 0; p.y++; c = get_char_at(p); }
+	}
+
+	return fix_toofar(p);
+}
+
+static pos_t bword_impl(pos_t p, bool big) {
+	if (p.x == 0) {
+		if (p.y == 0) return p;
+		p.y--;
+		p.x = E.rows[p.y].len;
+	} else {
+		p.x--;
+	}
+
+	char c = get_char_at(p);
+
+	while (isspace((u8)c)) {
+		if (p.x == 0) {
+			if (p.y == 0) return fix_toofar(p);
+			p.y--;
+			p.x = E.rows[p.y].len;
+		} else {
+			p.x--;
+		}
+		c = get_char_at(p);
+	}
+
+	if (big ? !isspace((u8)c) : iswordchar((u8)c)) {
+		while (p.x > 0 && (big ? !isspace((u8)get_char_at((pos_t){p.x - 1, p.y}))
+		                       : iswordchar((u8)get_char_at((pos_t){p.x - 1, p.y})))) {
+			p.x--;
+		}
+	} else {
+		while (p.x > 0) {
+			char pc = get_char_at((pos_t){p.x - 1, p.y});
+			if (isspace((u8)pc) || (big ? false : iswordchar((u8)pc))) break;
+			p.x--;
+		}
+	}
+
+	return fix_toofar(p);
+}
+
+static pos_t motion_fword(pos_t p, u32 count) {
+	for (u32 i = 0; i < count; i++) p = fword_impl(p, false);
+	return p;
+}
+
+static pos_t motion_bword(pos_t p, u32 count) {
+	for (u32 i = 0; i < count; i++) p = bword_impl(p, false);
+	return p;
+}
+
+static pos_t motion_fWORD(pos_t p, u32 count) {
+	for (u32 i = 0; i < count; i++) p = fword_impl(p, true);
+	return p;
+}
+
+static pos_t motion_bWORD(pos_t p, u32 count) {
+	for (u32 i = 0; i < count; i++) p = bword_impl(p, true);
+	return p;
+}
+
 static void motions_init(void) {
 	memset(motions, 0, sizeof(motions));
 
+	// NOTE: Try to order these in ASCII order
+	// TODO: The ones that are being set to NULL
+	motions['\n'] = NULL;
+	motions['$'] = motion_end;
+	motions['B'] = motion_bWORD;
+	motions['G'] = motion_file_bottom;
+	motions['W'] = motion_fWORD;
+	motions['_'] = motion_home;
+	motions['b'] = motion_bword;
 	motions['h'] = motion_left;
+	motions['g'] = motion_file_top;
 	motions['j'] = motion_down;
 	motions['k'] = motion_up;
 	motions['l'] = motion_right;
-	motions['_'] = motion_home;
-	motions['$'] = motion_end;
-	motions['g'] = motion_file_top;
-	motions['G'] = motion_file_bottom;
 	motions['w'] = motion_fword;
-	motions['b'] = motion_bword;
-	motions['W'] = motion_fWORD;
-	motions['B'] = motion_bWORD;
+	motions['{'] = NULL;
+	motions['}'] = NULL;
 }
 
 static pos_t run_motion(int key, pos_t start, u32 count) {
-	if (key < sizeof(motions)) {
+	if ((u32)key < sizeof(motions)) {
 		motion_fn motion = motions[key];
 		if (motion) return motion(start, count);
 	}
@@ -615,11 +707,8 @@ static pos_t run_motion(int key, pos_t start, u32 count) {
 
 // TODO:
 static void change_range(pos_t start, pos_t end) {}
-
 static void delete_range(pos_t start, pos_t end) {}
-
 static void yank_range(pos_t start, pos_t end) {}
-
 
 /*
  * Input handling
@@ -641,7 +730,7 @@ static char* prompt(char* msg) {
 			if (len > 0) buf[--len] = '\0';
 			else break;
 			continue;
-		} else if (!isprint((u8)c)) continue;
+		} else if (iscntrl((u8)c) || c >= 127) continue;
 
 		if (len == cap - 1) {
 			cap *= 2;
@@ -766,17 +855,27 @@ handle_as_motion:
 static void process_keypress(void) {
 	u32 c = read_key();
 
-	if (E.mode == M_NORMAL) switch (c) {
-	case 'i': E.mode = M_INSERT; break;
-	case 'I': process_normal('_'); E.mode = M_INSERT; break;
-	case 'a': process_normal('l'); E.mode = M_INSERT; break;
-	case 'A': process_normal('$'); E.mode = M_INSERT; break;
-	case ':': E.mode = M_COMMAND; break;
-	default: process_normal(c);
+	if (E.mode == M_NORMAL) {
+		switch (c) {
+		case 'i': E.mode = M_INSERT; break;
+		case 'I': process_normal('_'); E.mode = M_INSERT; break;
+		case 'a': process_normal('l'); E.mode = M_INSERT; break;
+		case 'A': process_normal('$'); E.mode = M_INSERT; break;
+		case 'o': row_insert(++E.cy, "", 0); E.mode = M_INSERT; break;
+		case 'O': row_insert(E.cy, "", 0); E.mode = M_INSERT; break;
+		case 'x': process_normal('l');
+		case 'X': delete_char(); break;
+		case ':': E.mode = M_COMMAND; break;
+		default: process_normal(c); break;
+		}
+		pos_t fix = fix_toofar((pos_t){ E.cx, E.cy });
+		E.cx = fix.x;
+		E.cy = fix.y;
 	} else if (E.mode == M_INSERT) switch (c) {
 	case CTRL_KEY('c'):
 	case ESCAPE: E.mode = M_NORMAL; process_normal('h'); break;
 	case RETURN: insert_newline(); break;
+	case DELETE: process_normal('l');
 	case BACKSPACE:
 	case CTRL_KEY('h'): delete_char(); break;
 	default: if (isprint((u8)c)) insert_char(c); break;
@@ -794,11 +893,11 @@ static void process_keypress(void) {
  * Initialization & cleanup
  */
 static void cleanup_editor(void) {
+	write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
+	disable_raw();
 	for (u32 i = 0; i < E.row_count; i++) row_free(&E.rows[i]);
 	free(E.rows);
 	free(E.filename);
-	disable_raw();
-	write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
 }
 
 static void init_editor(void) {
