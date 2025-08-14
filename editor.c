@@ -25,7 +25,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.14"
+#define VERSION	"0.0.15"
 
 /*
  * Global definitions
@@ -49,6 +49,7 @@ enum optype { OP_NONE, OP_DELETE, OP_YANK, OP_CHANGE };
 
 typedef struct { u32 x, y; } pos_t;
 typedef pos_t (*motion_fn)(pos_t start, u32 count);
+motion_fn motions[128];
 
 static struct editor {
 	u8 mode;
@@ -221,12 +222,14 @@ static char* rows_to_string(u32* buflen) {
 	return buf;
 }
 
+static void refresh_screen(void);
 static void statusmsg_set(const char* fmt, ...) {
 	va_list ap;
 	va_start(ap, fmt);
 	vsnprintf(E.statusmsg, sizeof(E.statusmsg), fmt, ap);
 	va_end(ap);
 	E.statusmsg_time = time(NULL);
+	refresh_screen();
 }
 
 /*
@@ -517,33 +520,35 @@ static void refresh_screen(void) {
 /*
  * Motions
  */
+static pos_t fix_toofar(pos_t p) {
+	if (p.y >= E.row_count) p.y = E.row_count ? E.row_count - 1 : 0;
+	u32 len = E.rows[p.y].len;
+	if (p.x > len) p.x = len;
+	return p;
+}
 
 static pos_t motion_up(pos_t p, u32 count) {
-	for (u32 i = 0; i < count; i++) {
-		if (p.y != 0) p.y--;
-	}
-	return p;
+	u32 dy = (count > p.y) ? p.y : count;
+	p.y -= dy;
+	return fix_toofar(p);
 }
 
 static pos_t motion_down(pos_t p, u32 count) {
-	for (u32 i = 0; i < count; i++) {
-		if (p.y < E.row_count) p.y++;
-	}
-	return p;
+	u32 dy = (p.y + count > E.row_count) ? E.row_count - p.y : count;
+	p.y += dy;
+	return fix_toofar(p);
 }
 
 static pos_t motion_left(pos_t p, u32 count) {
-	for (u32 i = 0; i < count; i++) {
-		if (p.x != 0) p.x--;
-	}
+	u32 dx = (count > p.x) ? p.x : count;
+	p.x -= dx;
 	return p;
 }
 
 static pos_t motion_right(pos_t p, u32 count) {
-	struct erow* row = (p.y >= E.row_count) ? NULL : &E.rows[p.y];
-	for (u32 i = 0; i < count; i++) {
-		if (row && p.x < row->len) p.x++;
-	}
+	u32 len = (p.y >= E.row_count) ? 0 : E.rows[p.y].len;
+	u32 dx = (p.x + count > len) ? len - p.x : count;
+	p.x += dx;
 	return p;
 }
 
@@ -563,26 +568,52 @@ static pos_t motion_bword(pos_t p, u32 count) { return p; }
 static pos_t motion_fWORD(pos_t p, u32 count) { return p; }
 static pos_t motion_bWORD(pos_t p, u32 count) { return p; }
 
-static pos_t run_motion(int key, pos_t start, u32 count) {
-	statusmsg_set("  %u%c", count, (u8)key, start.x + 1, start.y + 1);
+static pos_t motion_file_top(pos_t p, u32 count) {
+	(void)count;
+	p.y = 0;
+	struct erow* row = (p.y >= E.row_count) ? NULL : &E.rows[p.y];
+	u32 len = row ? row->len : 0;
+	if (p.x > len) p.x = len;
+	return fix_toofar(p);
+}
 
-	switch (key) {
-	case 'h': return motion_left(start, count);
-	case 'j': return motion_down(start, count);
-	case 'k': return motion_up(start, count);
-	case 'l': return motion_right(start, count);
-	case '$': return motion_end(start, count);
-	case '_': return motion_home(start, count);
-	case 'w': return motion_fword(start, count);
-	case 'b': return motion_bword(start, count);
-	case 'W': return motion_fWORD(start, count);
-	case 'B': return motion_bWORD(start, count);
-	default: statusmsg_set("'%c' is not implemented", isprint((u8)key) ? (u8)key : '?'); break;
+static pos_t motion_file_bottom(pos_t p, u32 count) {
+	(void)count;
+	p.y = E.row_count ? E.row_count - 1 : 0;
+	struct erow* row = (p.y >= E.row_count) ? NULL : &E.rows[p.y];
+	u32 len = row ? row->len : 0;
+	if (p.x > len) p.x = len;
+	return fix_toofar(p);
+}
+
+static void motions_init(void) {
+	memset(motions, 0, sizeof(motions));
+
+	motions['h'] = motion_left;
+	motions['j'] = motion_down;
+	motions['k'] = motion_up;
+	motions['l'] = motion_right;
+	motions['_'] = motion_home;
+	motions['$'] = motion_end;
+	motions['g'] = motion_file_top;
+	motions['G'] = motion_file_bottom;
+	motions['w'] = motion_fword;
+	motions['b'] = motion_bword;
+	motions['W'] = motion_fWORD;
+	motions['B'] = motion_bWORD;
+}
+
+static pos_t run_motion(int key, pos_t start, u32 count) {
+	if (key < sizeof(motions)) {
+		motion_fn motion = motions[key];
+		if (motion) return motion(start, count);
 	}
 
+	statusmsg_set("'%c' is not implemented", isprint((u8)key) ? (u8)key : '?');
 	return start;
 }
 
+// TODO:
 static void change_range(pos_t start, pos_t end) {}
 
 static void delete_range(pos_t start, pos_t end) {}
@@ -602,13 +633,15 @@ static char* prompt(char* msg) {
 
 	while (1) {
 		statusmsg_set(msg, buf);
-		refresh_screen();
 
 		u32 c = read_key();
 		if (c == ESCAPE) break;
 		else if (c == '\r') return buf;
-		else if ((c == CTRL_KEY('h') || c == BACKSPACE) && len > 0) buf[--len] = '\0';
-		else if (iscntrl((u8)c) || c > 127) continue;
+		else if (c == CTRL_KEY('h') || c == BACKSPACE) {
+			if (len > 0) buf[--len] = '\0';
+			else break;
+			continue;
+		} else if (!isprint((u8)c)) continue;
 
 		if (len == cap - 1) {
 			cap *= 2;
@@ -616,9 +649,11 @@ static char* prompt(char* msg) {
 			if (buf == NULL) die("realloc");
 		} 
 
-		buf[len++] = c;
+		buf[len++] = (u8)c;
 		buf[len] = '\0';
 	}
+
+	statusmsg_set("");
 
 	free(buf);
 	return NULL;
@@ -650,6 +685,9 @@ static void eval_command(char* cmd) {
 		save_file(arg);
 		exit(0);
 	} else if (strcmp(cmd, "e") == 0) {
+		if (E.dirty) statusmsg_set("No write since last change");
+		else open_file(arg);
+	} else if (strcmp(cmd, "e!") == 0) {
 		open_file(arg);
 	} else statusmsg_set("'%s' is not implemented", cmd);
 }
@@ -661,6 +699,8 @@ static void insert_char(u32 c) {
 }
 
 static void insert_newline(void) {
+	if (E.cy > E.row_count) E.cy = E.row_count ? E.row_count - 1 : 0;
+
 	if (E.cx == 0) row_insert(E.cy, "", 0);
 	else {
 		struct erow* row = &E.rows[E.cy];
@@ -675,7 +715,7 @@ static void insert_newline(void) {
 }
 
 static void delete_char(void) {
-	if (E.cy == E.row_count || (E.cx == 0 && E.cy == 0)) return;
+	if (E.cy >= E.row_count || (E.cx == 0 && E.cy == 0)) return;
 
 	struct erow* row = &E.rows[E.cy];
 	if (E.cx > 0) {
@@ -766,6 +806,7 @@ static void init_editor(void) {
 	enable_raw();
 	if (get_winsize(&E.screen_rows, &E.screen_cols) != 0) die("get_winsize");
 	E.screen_rows -= 2;
+	motions_init();
 	atexit(cleanup_editor);
 }
 
