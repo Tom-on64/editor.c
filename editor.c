@@ -25,7 +25,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define VERSION	"0.0.16"
+#define VERSION	"0.1.0"
 
 /*
  * Global definitions
@@ -343,7 +343,6 @@ static u8 get_winsize(u32* rows, u32* cols) {
 /*
  * File I/O
  */
-
 static void open_file(char* filepath) {
 	if (!filepath && !E.filename) {
 		statusmsg_set("No file name");
@@ -770,6 +769,9 @@ static void eval_command(char* cmd) {
 		exit(0);
 	} else if (strcmp(cmd, "w") == 0) {
 		save_file(arg);
+	} else if (strcmp(cmd, "w!") == 0) { // TODO: Make this do something
+		save_file(arg);
+		statusmsg_set("");
 	} else if (strcmp(cmd, "wq") == 0) {
 		save_file(arg);
 		exit(0);
@@ -823,6 +825,7 @@ static void process_normal(u32 c) {
 		u32 digit = c - '0';
 		if (E.pending_count == 0 && digit == 0) goto handle_as_motion;
 		E.pending_count = E.pending_count * 10 + digit;
+		if (E.pending_count > MAX_COUNT) E.pending_count = MAX_COUNT;
 		return;
 	}
 

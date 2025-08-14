@@ -10,5 +10,5 @@ $(TARGET): $(SOURCE)
 	$(CC) $(CCFLAGS) $< -o $@
 
 clean:
-	rm $(TARGET)
+	rm -f $(TARGET)
 

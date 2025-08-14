@@ -1,12 +1,45 @@
 editor.c - A simple, vi-like editor
 ===================================
 
-This is a simple, no-dependency, vi-like editor written in one C file.
+This is a simple, no dependency, vi-like editor written in ~1000 lines of C code.
 
-Features
+Usage
+-----
+You can launch the editor with a filename to open that file or just by itself
+to create an empty buffer. You can then use common vi bindings to edit your 
+files. Valid motions/bindings in NORMAL mode are:
+* 'h', 'j', 'k' & 'l' for single character movement
+* 'w', 'W', 'b' & 'B' for word movement
+* '_' & '$' for start and end of line respectively
+* 'g' & 'G' for start and end of file respectively
+* 'x' & 'X' for delete and backspace
+* 'i' to enter insert mode at cursor
+* 'I' to enter insert mode at start of line
+* 'a' to enter insert mode 1 character after cursor
+* 'A' to enter insert mode at end of line
+* 'o' to enter insert mode on a new line below cursor
+* 'O' to enter insert mode on a new line above cursor
+* ':' to enter command mode
+
+You can use <ESC> or ^C to leave INSERT mode.
+
+Here's a list of valid commands in COMMAND mode:
+* q [filename] - quit the editor
+* w [filename] - write file to disk
+* e [filename] - edit a file
+
+The [filename] argument is optional and is by default the current working
+filename. Any of these may be followed by a '!' to ignore warnings and force
+the command. You may also type 'wq [filename]' to write and quit the editor.
+
+Building
 --------
-* Normal, Insert & Command mode
-* hjkl movement
-* Arrow key support
-* Random segfaults :)
+You should be able to compile this on any unix-like OS as long as you have:
+* gcc
+* glibc
+
+Issues
+------
+If you encounter a bug (and believe me, you will), please report it in the
+issues tab or fix it yourself and submit a pull request.
 
