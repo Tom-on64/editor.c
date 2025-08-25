@@ -38,6 +38,10 @@ You should be able to compile this on any unix-like OS as long as you have:
 * gcc
 * glibc
 
+To build you just need to compile the 'editor.c'. You may use the provided makefile:
+	$ make		# Compile
+	$ ./editor	# Run the program
+
 Issues
 ------
 If you encounter a bug (and believe me, you will), please report it in the

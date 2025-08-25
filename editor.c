@@ -43,7 +43,7 @@ typedef int32_t  i32;
 typedef int64_t  i64;
 
 enum mode 		 { M_NORMAL, M_INSERT, M_COMMAND, M_VISUAL };
-const char* MODE_STR[] = { "Normal", "Insert", "Command", "Visual" };
+const char* MODE_STR[] = { "NOR", "INS", "CMD", "VIS" };
 
 enum optype { OP_NONE, OP_DELETE, OP_YANK, OP_CHANGE };
 
@@ -456,7 +456,7 @@ static void draw_statusbar(struct abuf* ab) {
 	ab_append(ab, "\x1b[7m", 4);
 	char lstatus[80], rstatus[80];
 
-	u32 llen = snprintf(lstatus, sizeof(lstatus), "%c %.20s %s", MODE_STR[E.mode][0], E.filename ? E.filename : "No file", E.dirty ? "[modified]" : "");
+	u32 llen = snprintf(lstatus, sizeof(lstatus), "%s %.20s %s", MODE_STR[E.mode], E.filename ? E.filename : "No file", E.dirty ? "[modified]" : "");
 	u32 rlen = snprintf(rstatus, sizeof(rstatus), "%u:%u", E.cx + 1, E.cy + 1);
 
 	if (llen > E.screen_cols) llen = E.screen_cols;

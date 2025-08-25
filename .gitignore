@@ -4,4 +4,5 @@ editor
 *.so
 *.bin
 *.log
+dist
 
